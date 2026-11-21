@@ -24,6 +24,25 @@ The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\pyth
 
 [`03_agentic_app.ipynb`](03_agentic_app.ipynb) runs the starter chat example. It requires a local `OPENAI_API_KEY` to call the provider. Keep any local `.env`, the virtual environment, and generated databases out of version control.
 
+## Ticket routing
+
+After database setup, pass a ticket to the project's LangGraph workflow. The initial classifier uses rules for common English CultPass requests.
+
+```python
+from agentic.support_workflow import build_support_graph
+
+graph = build_support_graph("data/core/udahub.db")
+result = graph.invoke({
+    "account_id": "cultpass",
+    "text": "I forgot my password. How can I sign in again?",
+    "channel": "chat",
+    "urgency": "normal",
+})
+print(result["decision"])
+```
+
+The supervisor reports the next step and its reason. `resolve` means that the retrieved articles cover every detected intent. `lookup_account` signals that customer-specific facts are needed, and `escalate` identifies a case for human handling. These decisions are inputs for the next agents in the planned workflow.
+
 ## Knowledge retrieval
 
 After database setup, use the LangGraph retrieval subgraph with search terms grouped by intent. It reads the account's articles from SQLite without provider credentials.
@@ -41,7 +60,7 @@ result = graph.invoke({
 })["retrieval"]
 ```
 
-The result contains up to three ranked candidates per intent and a status of `ready`, `insufficient_evidence`, or `unavailable`. Run the retrieval tests with `.venv/bin/python -m unittest discover -s tests -v`.
+The result contains up to three ranked candidates per intent and a status of `ready`, `insufficient_evidence`, or `unavailable`. Run the routing and retrieval tests with `.venv/bin/python -m unittest discover -s tests -v`.
 
 ## Starter material and attribution
 
