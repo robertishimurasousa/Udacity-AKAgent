@@ -192,6 +192,7 @@ class HandoffMemoryTests(unittest.TestCase):
             "outage": httpx.Response(503, json=failure),
             "extra field": httpx.Response(200, json=unexpected),
             "invalid JSON": httpx.Response(200, content=b"{", headers={"content-type": "application/json"}),
+            "invalid encoding": httpx.Response(200, content=b"\xff", headers={"content-type": "application/json"}),
             "HTML gateway": httpx.Response(200, text="<html>Gateway failure</html>"),
         }
         for case, response in responses.items():

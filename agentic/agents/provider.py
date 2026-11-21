@@ -2,7 +2,7 @@ import json
 from typing import Callable, Literal
 
 from openai import APIError, OpenAI
-from pydantic import BaseModel, ConfigDict, ValidationError
+from pydantic import BaseModel, ConfigDict
 
 from agentic.agents.resolver import SupportResponse
 from agentic.tools.cultpass import AccountEvidence
@@ -44,14 +44,10 @@ def build_openai_reviewer(client: OpenAI, *, model: str = DEFAULT_MODEL) -> Evid
                 max_output_tokens=64,
                 store=False,
             )
-            parsed = result.output_parsed
-        except (APIError, ValidationError, json.JSONDecodeError, AttributeError, TypeError):
+            parsed = result.output_parsed if result.status == "completed" else None
+        except (APIError, ValueError, AttributeError, TypeError):
             # The SDK can encounter an invalid response body before validating the verdict.
             return "unavailable"
-        return (
-            parsed.verdict
-            if result.status == "completed" and isinstance(parsed, GroundingReview)
-            else "unavailable"
-        )
+        return parsed.verdict if isinstance(parsed, GroundingReview) else "unavailable"
 
     return review
