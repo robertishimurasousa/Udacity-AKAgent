@@ -23,7 +23,10 @@ The supervisor routes high-urgency tickets, sensitive action requests, and expli
 
 ```mermaid
 flowchart TD
-    Input["Ticket, metadata and trusted profile context"] --> Context["Recall history when scoped"]
+    Input["Ticket, metadata and trusted profile context"] --> Access["CLI validates profile and ticket ownership"]
+    Access -->|"Invalid profile or ticket scope"| Denied["Reject input"]
+    Access -->|"Authorized ticket"| Reset["Start a fresh turn"]
+    Reset --> Context["Recall history when scoped"]
     Context -->|"New turn"| Classify["Classifier"]
     Context -->|"Saved turn"| Output["Return outcome"]
     Context -->|"History unavailable"| Error["Return operational error"]
@@ -47,7 +50,7 @@ flowchart TD
 
 ## Contract and state
 
-The normalized input contains `account_id`, message text, optional channel and urgency, and optional ticket, turn and verified profile fields. The caller supplies the verified profile separately from the message. The CLI accepts a synthetic fixture ID to simulate a trusted connector. Full interface authentication and ticket ownership checks remain pending.
+The normalized input contains `account_id`, message text, optional channel and urgency, and optional ticket, turn and verified profile fields. The caller supplies the verified profile separately from the message. The CLI accepts a synthetic fixture ID to simulate a trusted connector. It validates the profile in CultPass and checks the authoritative ticket catalog before executing or inspecting the workflow. The first authenticated request for a new ticket creates its UDA-Hub ownership record. For tickets recorded by the older CLI, the history store can provide the original owner key. Ambiguous owner keys cause a rejection.
 
 Graph state contains remembered turns and the current turn's classification, route, evidence, tool results, and outcome. The output reports the decision and its reason, plus a cited response or handoff when applicable. Relevance scores remain available in the retrieval result. With scoped history enabled, an unavailable store or a rejected turn write produces `operational_error`. A repeated turn ID can be submitted after storage is restored.
 
@@ -80,7 +83,9 @@ The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create t
 
 The separate optional SQLite history file stores customer messages, decisions, classified intents, and responses or handoffs. It scopes the data by organization, verified customer, and ticket. Current-session follow-ups can reuse the last resolved intents. A new ticket can use preferences and inspect recent resolved topics from the same customer. Completed turn IDs replay the stored outcome, including after process restart. Metadata-only rows retain their original information during schema upgrades.
 
-LangGraph transfers turn state between nodes. Native checkpoint inspection by `thread_id` remains pending. The CLI writes a local JSONL trace with the ticket and turn IDs, route decisions, retrieval scores and article IDs, tool statuses, provider verdict and final outcome. Replays record their final decision and `replayed` status. Ticket and turn IDs must be opaque strings. Event fields exclude credentials, identity details, messages, responses, and excerpts.
+LangGraph transfers turn state between nodes. For verified profiles, the CLI uses a separate SQLite checkpoint file and derives the `thread_id` from the authorized organization, profile, and ticket. It passes each new ticket as `turn_input`. The first node clears the previous turn's inputs and derived fields before applying the new inputs. The history node then loads the scoped conversation and preferences, including a saved outcome when the requested turn is a replay. The [CLI inspection command](../../README.md#inspect-a-session-checkpoint) shows the completed checkpoint for the authorized thread.
+
+The CLI writes a local JSONL trace with the ticket and turn IDs, route decisions, retrieval scores and article IDs, tool statuses, provider verdict and final outcome. Replays record their final decision and `replayed` status. Ticket and turn IDs must be opaque strings. Event fields exclude credentials, identity details, messages, responses, and excerpts.
 
 ## Delivery and validation
 

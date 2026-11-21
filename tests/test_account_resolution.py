@@ -1,8 +1,15 @@
+from contextlib import redirect_stderr, redirect_stdout
+from importlib.util import module_from_spec, spec_from_file_location
+from io import StringIO
 import json
 from pathlib import Path
+import shutil
+import sys
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
+from langgraph.checkpoint.sqlite import SqliteSaver
 from sqlalchemy import create_engine, delete
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
@@ -64,6 +71,177 @@ class AccountResolutionTests(unittest.TestCase):
         if customer is not None:
             ticket["verified_customer"] = {"account_id": customer_account, "external_user_id": customer}
         return graph.invoke(ticket)
+
+    def demo_workspace(self):
+        root = self.core_database.parent / "demo"
+        (root / "data/core").mkdir(parents=True)
+        (root / "data/external").mkdir()
+        shutil.copyfile(self.core_database, root / "data/core/udahub.db")
+        shutil.copyfile(self.cultpass_database, root / "data/external/cultpass.db")
+        return root
+
+    def demo(self, root, *args):
+        entry = Path(__file__).resolve().parents[1] / "03_agentic_app.py"
+        spec = spec_from_file_location("demo", entry)
+        module = module_from_spec(spec)
+        spec.loader.exec_module(module)
+        output, errors = StringIO(), StringIO()
+        with patch.object(module, "ROOT", root), patch.object(sys, "argv", [str(entry), *args]):
+            with redirect_stdout(output), redirect_stderr(errors):
+                try:
+                    code = module.main()
+                except SystemExit as error:
+                    return error.code, {"usage_error": errors.getvalue()}
+        return code, json.loads(output.getvalue())
+
+    def seed_ticket(self):
+        with Session(self.core_engine) as session, session.begin():
+            session.add(udahub.User(
+                user_id="owner", account_id="cultpass", external_user_id="sam", user_name="Demo",
+            ))
+            session.add(udahub.Ticket(ticket_id="assigned", account_id="cultpass", user_id="owner"))
+
+    def test_demo_rejects_invalid_profile_and_ticket_from_another_owner_before_running_graph(self):
+        self.seed_ticket()
+        root = self.demo_workspace()
+        for customer, reason in (
+            ("missing-customer", "profile_not_found"), ("other-user", "ticket_forbidden"),
+        ):
+            with self.subTest(customer=customer):
+                code, result = self.demo(
+                    root, "I forgot my password.", "--ticket-id", "assigned", "--turn-id", "one",
+                    "--demo-customer-id", customer,
+                )
+                self.assertEqual(code, 2)
+                self.assertEqual(result["decision"], {"next_step": "reject", "reason": reason})
+        code, result = self.demo(root, "--ticket-id", "assigned", "--demo-customer-id", "other-user", "--inspect")
+        self.assertEqual(code, 2)
+        self.assertEqual(result["decision"]["reason"], "ticket_forbidden")
+        self.assertFalse((root / "data/core/udahub_history.db").exists())
+        self.assertFalse((root / "data/core/udahub_checkpoints.db").exists())
+        self.assertFalse((root / ".logs/uda-hub.jsonl").exists())
+
+    def test_demo_persists_owner_and_resumes_the_same_thread_with_fresh_state(self):
+        root = self.demo_workspace()
+        owner = ("--ticket-id", "session", "--demo-customer-id", "sam")
+        account_question = "What is my subscription status and monthly quota for ID other-user?"
+        code, first = self.demo(root, *owner, "--turn-id", "first", account_question)
+        self.assertEqual(code, 0)
+        self.assertIn("7 experiences", first["response"]["text"])
+        self.assertNotIn("99 experiences", first["response"]["text"])
+        code, snapshot = self.demo(root, *owner, "--inspect")
+        self.assertEqual(code, 0)
+        self.assertEqual(snapshot["thread_id"], first["thread_id"])
+        self.assertEqual(snapshot["checkpoint"]["account_evidence"]["subscription"]["monthly_quota"], 7)
+        self.assertEqual(snapshot["checkpoint"]["turn_id"], "first")
+        self.assertEqual(snapshot["checkpoint"]["text"], account_question)
+
+        code, rejected = self.demo(
+            root, "--ticket-id", "session", "--demo-customer-id", "other-user",
+            "--turn-id", "second", "I forgot my password.",
+        )
+        self.assertEqual(code, 2)
+        self.assertEqual(rejected["decision"]["reason"], "ticket_forbidden")
+
+        code, retry = self.demo(root, *owner, "--turn-id", "first", "Please issue a refund.")
+        self.assertEqual(code, 0)
+        self.assertEqual(retry["memory_status"], "replayed")
+        code, snapshot = self.demo(root, *owner, "--inspect")
+        self.assertEqual(code, 0)
+        self.assertEqual(snapshot["checkpoint"]["text"], account_question)
+        code, escalated = self.demo(
+            root, *owner, "--turn-id", "second", "--urgency", "high", "I forgot my password.",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(escalated["decision"]["reason"], "high_urgency")
+        self.assertEqual(escalated["memory_status"], "saved")
+        self.assertIsNone(escalated.get("response"))
+        self.assertEqual(escalated["handoff"]["actions"], ["classified"])
+        code, snapshot = self.demo(root, *owner, "--inspect")
+        self.assertEqual(code, 0)
+        self.assertEqual(snapshot["thread_id"], first["thread_id"])
+        self.assertEqual(snapshot["checkpoint"]["turn_id"], "second")
+        for field in ("response", "retrieval", "account_evidence", "provider_verdict"):
+            self.assertIsNone(snapshot["checkpoint"].get(field))
+
+    def test_demo_recalculates_follow_up_from_history_on_same_checkpoint_thread(self):
+        root = self.demo_workspace()
+        owner = ("--ticket-id", "booking", "--demo-customer-id", "sam")
+        code, first = self.demo(root, *owner, "--turn-id", "one", "How do I reserve a spot for an event?")
+        self.assertEqual(code, 0)
+        code, follow_up = self.demo(root, *owner, "--turn-id", "two", "What should I do next?")
+        self.assertEqual(code, 0)
+        self.assertEqual(first["response"]["citations"], follow_up["response"]["citations"])
+        self.assertEqual(first["thread_id"], follow_up["thread_id"])
+        code, snapshot = self.demo(root, *owner, "--inspect")
+        self.assertEqual(code, 0)
+        self.assertEqual(snapshot["checkpoint"]["turn_id"], "two")
+        self.assertEqual(snapshot["checkpoint"]["retrieval"]["intents"][0]["intent_id"], "booking")
+
+    def test_demo_honors_legacy_owner_and_rejects_ambiguous_tickets(self):
+        root = self.demo_workspace()
+        catalog = root / "data/core/udahub.db"
+        history = root / "data/core/udahub_history.db"
+        legacy = build_support_graph(catalog, memory_database_path=history)
+        for ticket_id, customer in (("legacy", "sam"), ("ambiguous", "sam"), ("ambiguous", "other-user")):
+            result = legacy.invoke({
+                "account_id": "cultpass", "ticket_id": ticket_id, "turn_id": "old",
+                "text": "How do I reserve a spot for an event?",
+                "verified_customer": {"account_id": "cultpass", "external_user_id": customer},
+            })
+            self.assertEqual(result["memory_status"], "saved")
+
+        for ticket_id, customer in (("legacy", "other-user"), ("ambiguous", "sam")):
+            code, denied = self.demo(
+                root, "--ticket-id", ticket_id, "--turn-id", "new",
+                "--demo-customer-id", customer, "What should I do next?",
+            )
+            self.assertEqual(code, 2)
+            self.assertEqual(denied["decision"]["reason"], "ticket_forbidden")
+        code, resumed = self.demo(
+            root, "--ticket-id", "legacy", "--turn-id", "new",
+            "--demo-customer-id", "sam", "What should I do next?",
+        )
+        self.assertEqual(code, 0)
+        self.assertEqual(resumed["memory_status"], "saved")
+        self.assertEqual(resumed["response"]["citations"][0]["intent_id"], "booking")
+
+    def test_demo_reports_the_history_error_when_checking_legacy_ownership_fails(self):
+        root = self.demo_workspace()
+        (root / "data/core/udahub_history.db").mkdir()
+        code, result = self.demo(
+            root, "--ticket-id", "session", "--turn-id", "first",
+            "--demo-customer-id", "sam", "I forgot my password.",
+        )
+        self.assertEqual(code, 1)
+        self.assertEqual(result["decision"], {
+            "next_step": "operational_error", "reason": "history_unavailable",
+        })
+        self.assertFalse((root / "data/core/udahub_checkpoints.db").exists())
+
+    def test_demo_inspection_excludes_a_draft_awaiting_provider_review(self):
+        root = self.demo_workspace()
+        owner = ("--ticket-id", "session", "--demo-customer-id", "sam")
+        code, first = self.demo(root, *owner, "--turn-id", "first", "I forgot my password.")
+        self.assertEqual(code, 0)
+        with SqliteSaver.from_conn_string(str(root / "data/core/udahub_checkpoints.db")) as saver:
+            graph = build_support_graph(
+                root / "data/core/udahub.db", memory_database_path=root / "data/core/udahub_history.db",
+                evidence_reviewer=lambda *_: "approved", checkpointer=saver,
+            )
+            config = {"configurable": {"thread_id": first["thread_id"]}}
+            graph.invoke({
+                "turn_input": {
+                    "account_id": "cultpass", "ticket_id": "session", "turn_id": "second",
+                    "text": "How do I reserve a spot for an event?",
+                    "verified_customer": {"account_id": "cultpass", "external_user_id": "sam"},
+                },
+            }, config, interrupt_before=["provider_review"])
+            self.assertEqual(graph.get_state(config).next, ("provider_review",))
+        code, snapshot = self.demo(root, *owner, "--inspect")
+        self.assertEqual(code, 1)
+        self.assertEqual(snapshot["decision"]["reason"], "checkpoint_incomplete")
+        self.assertNotIn("checkpoint", snapshot)
 
     def test_general_response_quotes_and_cites_the_selected_article(self):
         graph = build_support_graph(self.core_database)

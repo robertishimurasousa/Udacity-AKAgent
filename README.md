@@ -53,7 +53,9 @@ demo_customer=$(sqlite3 data/external/cultpass.db \
 jq -c 'select(.ticket_id == "demo-plan" and .turn_id == "first")' .logs/uda-hub.jsonl
 ```
 
-The profile flag supplies trusted context for the local synthetic fixture. It simulates a support connector and provides no authentication or ticket ownership checks. The OpenAI reviewer receives the drafted answer, its article excerpts, and the structured facts needed for the answer. It returns an approval or rejection. The workflow escalates if the review rejects the draft or is unavailable. Missing knowledge escalates before model review.
+The profile flag simulates the authenticated identity supplied by a support connector. The CLI checks that the profile exists in CultPass and owns the ticket before the workflow runs. A new ticket submitted by a valid profile is registered to that profile in UDA-Hub. Existing tickets require their owner. A new anonymous ticket can receive general guidance without session history or checkpoints. A real connector must supply identity from its authentication context.
+
+The OpenAI reviewer receives the drafted answer, its article excerpts, and the structured facts needed for the answer. It returns an approval or rejection. The workflow escalates if the review rejects the draft or is unavailable. Missing knowledge escalates before model review.
 
 The JSONL trace records classifications, routes, candidate article IDs and scores, tool statuses, provider verdicts, handoffs and final outcomes. Supply opaque ticket and turn IDs for correlation. Ticket bodies, responses, customer IDs and credentials stay outside the trace. A trace write failure is visible as `trace_status="unavailable"`.
 
@@ -107,6 +109,21 @@ Enable history with `memory_database_path="data/core/udahub_history.db"` when bu
 The separate SQLite history file records the customer message, decision, and response with citations or handoff. The `memory.history` output contains the prior turns for that ticket. Repeating a completed turn ID in the same scope returns its stored outcome, including the provider verdict when recorded. Existing metadata-only rows remain available for context. When the workflow has a scoped history store, a storage failure returns `operational_error`. The reason is `history_unavailable` if the workflow cannot load the history or `history_write_failed` if recording the outcome fails. The demo exits with status 1 in both cases. After restoring storage, retry with the same ticket and turn IDs.
 
 Explicit requests such as `Please answer step by step.` and `Please keep your answers concise.` update the format for future tickets from the same verified profile. The workflow redacts common credential and email patterns from stored messages. Use synthetic tickets for the local demo.
+
+### Inspect a session checkpoint
+
+For tickets processed with `--demo-customer-id`, the CLI stores native LangGraph checkpoints in `data/core/udahub_checkpoints.db`. It derives `thread_id` from the organization, profile, and ticket after checking ownership. Reuse the same ticket ID and a new turn ID to continue a session.
+
+```sh
+.venv/bin/python 03_agentic_app.py --ticket-id demo-booking --turn-id first \
+  --demo-customer-id "$demo_customer" 'How do I reserve a spot for an event?'
+.venv/bin/python 03_agentic_app.py --ticket-id demo-booking --turn-id second \
+  --demo-customer-id "$demo_customer" 'What should I do next?'
+.venv/bin/python 03_agentic_app.py --ticket-id demo-booking \
+  --demo-customer-id "$demo_customer" --inspect
+```
+
+The inspection returns the current turn's message, route, evidence, and outcome where applicable. Conversation context comes from the scoped history. The graph clears the previous turn's transient state before classifying the next message. The CLI redacts common credential and email patterns before writing the checkpoint. A profile or ownership rejection exits with status 2. [LangGraph SQLite checkpointer](https://reference.langchain.com/python/langgraph.checkpoint.sqlite/SqliteSaver)
 
 ## Validation and delivery
 
