@@ -59,6 +59,8 @@ The [retrieval subgraph](../agents/knowledge.py) takes `account_id` and a list o
 
 The resolver receives only the retrieved articles and the authorized facts necessary for the case. The response uses validated excerpts and structured tool fields. Ticket text, history, and article content are treated as data. The initial customer preference is response format. The application applies the customer's choice of a concise or step-by-step response when rendering the output. Support policies come from the current knowledge base.
 
+The initial resolver selects marked customer-facing excerpts from the ranked articles. General answers use the article's `Suggested phrasing` section. Personalized answers pair the lookup facts with a separate `Account guidance` excerpt. If none of the qualifying articles provides the required excerpt, the workflow reports insufficient evidence.
+
 For verified customer-specific facts, use the lookup result. If a plan article lists four experiences per month and `lookup_subscription` returns seven for the verified customer, report seven as that customer's quota. Use the article for applicable general guidance and omit the conflicting generic amount from the personalized answer. If the required lookup fails or the applicable policy remains unclear, escalate.
 
 ## Support tools and data

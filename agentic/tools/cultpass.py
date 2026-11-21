@@ -36,9 +36,12 @@ class AccountEvidence(TypedDict):
 def _validate_scope(
     account_id: str, customer: VerifiedCustomer,
 ) -> Literal["forbidden", "invalid_input"] | None:
+    if not isinstance(customer, dict) or not isinstance(customer.get("account_id"), str):
+        return "invalid_input"
     if account_id != "cultpass" or customer["account_id"] != account_id:
         return "forbidden"
-    if not customer["external_user_id"].strip():
+    user_id = customer.get("external_user_id")
+    if not isinstance(user_id, str) or not user_id.strip():
         return "invalid_input"
     return None
 
