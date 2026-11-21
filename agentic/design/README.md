@@ -76,6 +76,8 @@ The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create t
 
 ## Sessions, persistence, and traceability
 
+The initial implementation uses an optional local SQLite history file for decisions and classified intents. It scopes history by organization, verified customer, and ticket. A follow-up can reuse the last resolved intents, and a new ticket can inspect recent resolved topics for the same customer. The handoff summary is returned to the caller. The rest of this section describes the planned full persistence and traceability model.
+
 - **Turn state.** LangGraph passes classifications, messages, evidence, and actions between nodes. The checkpoint uses a `thread_id` derived internally from the organization and ticket. It lets reviewers inspect the turn's messages and tool calls through the test session. The proposal uses a SQLite checkpointer to persist sessions in a local environment with serial writes.
 - **History and long-term memory.** `Ticket`, `TicketMetadata`, and `TicketMessage` store history and outcomes in the UDA-Hub SQLite database. A proposed preferences table keyed by organization and customer stores explicit response format choices. A new ticket can load preferences and summaries of resolved cases from the same customer, including after a restart. The query is scoped to that customer's history.
 - **Turn persistence.** Messages and outcomes are recorded before the application returns the output. A turn key scoped to the ticket lets the service retrieve an already saved response when a turn is retried. The checkpoint holds session state, and the UDA-Hub database records completed turns. After a restart without checkpoints, the application can recover persisted messages.
