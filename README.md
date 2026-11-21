@@ -39,9 +39,12 @@ result = graph.invoke({
     "urgency": "normal",
 })
 print(result["decision"])
+print(result.get("response"))
 ```
 
-The supervisor reports the next step and its reason. `resolve` means that the retrieved articles cover every detected intent. `lookup_account` signals that customer-specific facts are needed, and `escalate` identifies a case for human handling. These decisions are inputs for the next agents in the planned workflow.
+The supervisor reports the next step and its reason. When the resolver can answer every detected intent, `resolve` includes a text response and citations. For guidance, the text quotes the selected article. `escalate` records that the case needs human handling.
+
+To enable customer-specific answers, pass `cultpass_database_path="data/external/cultpass.db"` to `build_support_graph`. The caller must supply a `verified_customer` object with the account ID and external user ID from its trusted identity context. The workflow checks the account scope before looking up customer data. The resolver uses verified account facts for personalized statements and cites the relevant article. With only the knowledge database configured, a personalized ticket still returns `lookup_account` as the next step.
 
 ## Knowledge retrieval
 

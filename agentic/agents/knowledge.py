@@ -6,12 +6,10 @@ from unicodedata import normalize
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
-from sqlalchemy import create_engine
-from sqlalchemy.engine import URL
 from sqlalchemy.exc import SQLAlchemyError
-from sqlalchemy.pool import NullPool
 
 from agentic.tools.knowledge import read_account_articles
+from agentic.tools.sqlite import read_only_engine
 from data.models.udahub import Knowledge
 
 
@@ -84,12 +82,7 @@ def _rank_articles(query: set[str], articles: Sequence[Knowledge]) -> list[Artic
 
 def build_knowledge_graph(database_path: Path | str) -> CompiledStateGraph:
     """Build a read-only retrieval graph for preclassified ticket intents."""
-    database_url = URL.create(
-        "sqlite+pysqlite",
-        database=Path(database_path).resolve().as_uri(),
-        query={"mode": "ro", "uri": "true"},
-    )
-    engine = create_engine(database_url, poolclass=NullPool)
+    engine = read_only_engine(database_path)
 
     def retrieve(state: KnowledgeInput) -> KnowledgeOutput:
         if not state["intents"]:

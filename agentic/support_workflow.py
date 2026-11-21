@@ -1,11 +1,16 @@
+from functools import partial
 from pathlib import Path
 from typing import Literal, NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
+from sqlalchemy import Engine
 
 from agentic.agents.classifier import TicketClassification, classify_ticket
 from agentic.agents.knowledge import RetrievalResult, SearchIntent, build_knowledge_graph
+from agentic.agents.resolver import SupportResponse, compose_response
+from agentic.tools.cultpass import AccountEvidence, VerifiedCustomer, lookup_account, lookup_subscription
+from agentic.tools.sqlite import read_only_engine
 
 
 class TicketInput(TypedDict):
@@ -13,6 +18,7 @@ class TicketInput(TypedDict):
     text: str
     channel: NotRequired[str]
     urgency: NotRequired[str]
+    verified_customer: NotRequired[VerifiedCustomer]
 
 
 class Decision(TypedDict):
@@ -24,6 +30,8 @@ class TicketOutput(TypedDict):
     classification: TicketClassification
     decision: Decision
     retrieval: NotRequired[RetrievalResult]
+    account_evidence: NotRequired[AccountEvidence]
+    response: NotRequired[SupportResponse]
 
 
 class SupportState(TicketInput, TicketOutput):
@@ -60,21 +68,75 @@ def _supervise_retrieval(state: SupportState) -> dict[str, Decision]:
     return {"decision": {"next_step": "escalate", "reason": reason}}
 
 
-def build_support_graph(database_path: Path | str) -> CompiledStateGraph:
-    """Build the ticket workflow through classification, retrieval, and routing."""
+def _lookup_customer(state: SupportState, *, engine: Engine) -> dict[str, Decision | AccountEvidence]:
+    customer = state.get("verified_customer")
+    if customer is None:
+        return {"decision": {"next_step": "escalate", "reason": "identity_required"}}
+
+    account_id = state["account_id"]
+    account = lookup_account(engine, account_id, customer)
+    if account["status"] != "ok":
+        return {"decision": {"next_step": "escalate", "reason": f"account_{account['status']}"}}
+    if account["is_blocked"]:
+        return {"decision": {"next_step": "escalate", "reason": "account_blocked"}}
+
+    evidence: AccountEvidence = {"account": account}
+    if any(
+        intent["intent_id"] == "subscription_status" and intent["customer_data_required"]
+        for intent in state["classification"]["intents"]
+    ):
+        subscription = lookup_subscription(engine, account_id, customer)
+        if subscription["status"] != "ok":
+            return {"decision": {"next_step": "escalate", "reason": f"subscription_{subscription['status']}"}}
+        evidence["subscription"] = subscription
+    return {
+        "account_evidence": evidence,
+        "decision": {"next_step": "retrieve_knowledge", "reason": "customer_data_ready"},
+    }
+
+
+def _resolve(state: SupportState) -> dict[str, Decision | SupportResponse]:
+    response = compose_response(state["classification"], state["retrieval"], state.get("account_evidence"))
+    if response is None:
+        return {"decision": {"next_step": "escalate", "reason": "insufficient_evidence"}}
+    return {"response": response}
+
+
+def build_support_graph(
+    database_path: Path | str,
+    *,
+    cultpass_database_path: Path | str | None = None,
+) -> CompiledStateGraph:
+    """Build the ticket workflow with an optional CultPass data source."""
     graph = StateGraph(SupportState, input_schema=TicketInput, output_schema=TicketOutput)
     graph.add_node("classify", _classify)
     graph.add_node("supervisor", _supervise)
     graph.add_node("retrieve_knowledge", build_knowledge_graph(database_path))
     graph.add_node("review_evidence", _supervise_retrieval)
+    graph.add_node("resolve", _resolve)
+
+    account_route = END
+    if cultpass_database_path is not None:
+        account_route = "lookup_account"
+        graph.add_node(account_route, partial(_lookup_customer, engine=read_only_engine(cultpass_database_path)))
+        graph.add_conditional_edges(
+            account_route,
+            lambda state: state["decision"]["next_step"],
+            {"retrieve_knowledge": "retrieve_knowledge", "escalate": END},
+        )
 
     graph.add_edge(START, "classify")
     graph.add_edge("classify", "supervisor")
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state["decision"]["next_step"],
-        {"retrieve_knowledge": "retrieve_knowledge", "escalate": END, "lookup_account": END},
+        {"retrieve_knowledge": "retrieve_knowledge", "escalate": END, "lookup_account": account_route},
     )
     graph.add_edge("retrieve_knowledge", "review_evidence")
-    graph.add_edge("review_evidence", END)
+    graph.add_conditional_edges(
+        "review_evidence",
+        lambda state: state["decision"]["next_step"],
+        {"resolve": "resolve", "escalate": END},
+    )
+    graph.add_edge("resolve", END)
     return graph.compile()

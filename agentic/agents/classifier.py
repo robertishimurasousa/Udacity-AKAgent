@@ -9,6 +9,7 @@ from agentic.agents.knowledge import SearchIntent
 
 class ClassifiedIntent(SearchIntent):
     category: str
+    customer_data_required: bool
 
 
 class TicketClassification(TypedDict):
@@ -82,7 +83,6 @@ def classify_ticket(text: str) -> TicketClassification:
     """Classify the English CultPass topics supported by the initial workflow."""
     text = normalize("NFKC", text).casefold()
     by_id: dict[str, ClassifiedIntent] = {}
-    requires_account = False
     sensitive_action_requested = False
     for clause, inherits_how_to in _clauses(text):
         if not clause or COURTESY.fullmatch(clause):
@@ -91,20 +91,25 @@ def classify_ticket(text: str) -> TicketClassification:
             sensitive_action_requested = True
         rule = next((rule for rule in INTENT_RULES if re.search(rule.pattern, clause)), None)
         if rule is None:
-            by_id["unknown"] = {"intent_id": "unknown", "category": "unknown", "terms": []}
+            by_id["unknown"] = {
+                "intent_id": "unknown", "category": "unknown", "terms": [], "customer_data_required": False,
+            }
             continue
+        requires_account = rule.intent_id == "account_status" or (
+            rule.intent_id == "subscription_status" and bool(re.search(r"\b(?:my|mine|me|i)\b", clause))
+        )
+        prior_intent = by_id.get(rule.intent_id)
         by_id[rule.intent_id] = {
             "intent_id": rule.intent_id,
             "category": rule.category,
             "terms": list(rule.terms),
+            "customer_data_required": requires_account or (
+                prior_intent["customer_data_required"] if prior_intent else False
+            ),
         }
-        if rule.intent_id == "account_status" or (
-            rule.intent_id == "subscription_status" and re.search(r"\b(?:my|mine|me|i)\b", clause)
-        ):
-            requires_account = True
     return {
         "intents": list(by_id.values()),
         "human_support_requested": bool(HUMAN_REQUEST.search(text)),
         "sensitive_action_requested": sensitive_action_requested,
-        "customer_data_required": requires_account,
+        "customer_data_required": any(intent["customer_data_required"] for intent in by_id.values()),
     }
