@@ -81,7 +81,9 @@ The handoff is part of the workflow output and can be reviewed locally. Delivery
 
 Enable history with `memory_database_path="data/core/udahub_history.db"` when building the graph. Supply `verified_customer`, `ticket_id`, and a distinct `turn_id` for each new turn. After resolving a ticket, a follow-up such as `What should I do next?` can reuse its last resolved intents. The workflow can also recall recent resolved topics from the same customer's other tickets.
 
-The initial memory store records outcome and classified intents in a separate SQLite file. Repeating the same turn ID leaves one stored record. The history omits ticket text and response bodies. Storage failures appear as `memory_status="unavailable"` in the result.
+The separate SQLite history file records the customer message, decision, and response with citations or handoff. The `memory.history` output contains the prior turns for that ticket. Repeating a completed turn ID in the same scope returns its stored outcome. Existing metadata-only rows remain available for context and lack a saved response to replay. Storage failures appear as `memory_status="unavailable"`.
+
+Explicit requests such as `Please answer step by step.` and `Please keep your answers concise.` update the format for future tickets from the same verified profile. The workflow redacts common credential and email patterns from stored messages. Use synthetic tickets for the local demo.
 
 ## Validation and delivery
 
