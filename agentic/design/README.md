@@ -22,6 +22,8 @@ The demo uses the local interface and examples from chat and email, with the sam
 
 The supervisor routes high-urgency tickets, sensitive action requests, and explicit requests for human support directly to escalation. General questions go to the knowledge specialist. Account-specific requests go to the account specialist first, followed by article retrieval. Failure of a required tool, missing evidence, and classification or generation failures trigger escalation with an explicit reason. If the model is unavailable, the escalation agent uses a template with the category, reason, and lookups performed.
 
+The [initial ticket workflow](../support_workflow.py) connects a rules-based English classifier, the supervisor, and the retrieval subgraph. It records whether the next step is resolution, account lookup, or escalation, along with the reason. The diagram below shows the full planned workflow.
+
 ```mermaid
 flowchart TD
     Input["Ticket and metadata"] --> Context["Verify identity and load history"]
