@@ -144,6 +144,10 @@ The inspection returns the current turn's message, route, evidence, and outcome 
 - Run `.venv/bin/python -m unittest discover -s tests -v` from the repository root. The suite exercises SQLite retrieval, routing, identity boundaries, and grounded responses with synthetic data.
 - The GitHub checkout keeps the project at the repository root. The upload archive places the same project inside `solution/`, as specified by the course template. Run the validator from the directory containing this README in either layout. [Udacity project template](https://github.com/udacity/cd14641-langgraph-multi-public/blob/70c4797e28153b765e3053c5f23cf54b88e1a38c/project/solution/README.md)
 
+## Contribution language
+
+Use English for all contributions to Udacity projects. This includes branch names, commit messages, issue and pull request titles and descriptions, issue and review comments, code identifiers and comments, notebook text, documentation, and submission materials.
+
 ## Starter material and attribution
 
 The setup notebooks, sample workflow and utilities, data models, starter dependency list, and original seed data come from [Udacity's public course repository](https://github.com/udacity/cd14641-langgraph-multi-public/tree/70c4797e28153b765e3053c5f23cf54b88e1a38c/project). The original [Udacity license notice](LICENSE.md) accompanies that material. The first four articles are from the starter. The remaining 16 are project-authored examples for technical support, account management, billing, and reservations.
