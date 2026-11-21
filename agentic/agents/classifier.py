@@ -7,8 +7,12 @@ from unicodedata import normalize
 from agentic.agents.knowledge import SearchIntent
 
 
+PERSONAL_SUBSCRIPTION_INTENT = "personal_subscription_status"
+
+
 class ClassifiedIntent(SearchIntent):
     category: str
+    customer_data_required: bool
 
 
 class TicketClassification(TypedDict):
@@ -49,6 +53,10 @@ INTENT_RULES = (
 
 SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]+")
 CONJUNCTION = re.compile(r"\band\b(?=\s+\w+\s+\w)")
+SHARED_SUBSCRIPTION_DETAILS = re.compile(
+    r"\b((?:subscription status|plan status|monthly quota)(?:,\s*(?:plan|tier))?)"
+    r"\s*,?\s+and\s+(?=(?:monthly quota|plan details)\b)"
+)
 CHANGE_VERBS = "cancel|pause|change|reset|reschedule"
 SHARED_ACTION_OBJECT = re.compile(rf"\b({CHANGE_VERBS})\s+and\s+(?=(?:{CHANGE_VERBS})\s+(?:my|the|this)\b)")
 HOW_TO_QUESTION = re.compile(r"^(?:how\b|(?:can|could|would) you (?:explain|tell me|show me) how\b)")
@@ -73,6 +81,7 @@ IMPERATIVE_REQUEST = re.compile(SENSITIVE_ACTION)
 def _clauses(text: str) -> Iterator[tuple[str, bool]]:
     for sentence in SENTENCE_BOUNDARY.split(text):
         sentence = SHARED_ACTION_OBJECT.sub(r"\1 or ", sentence.strip())
+        sentence = SHARED_SUBSCRIPTION_DETAILS.sub(r"\1, ", sentence)
         shares_how_to = bool(HOW_TO_QUESTION.match(sentence))
         for index, clause in enumerate(CONJUNCTION.split(sentence)):
             yield clause.strip(" ,\t"), shares_how_to and index > 0
@@ -82,7 +91,6 @@ def classify_ticket(text: str) -> TicketClassification:
     """Classify the English CultPass topics supported by the initial workflow."""
     text = normalize("NFKC", text).casefold()
     by_id: dict[str, ClassifiedIntent] = {}
-    requires_account = False
     sensitive_action_requested = False
     for clause, inherits_how_to in _clauses(text):
         if not clause or COURTESY.fullmatch(clause):
@@ -91,20 +99,26 @@ def classify_ticket(text: str) -> TicketClassification:
             sensitive_action_requested = True
         rule = next((rule for rule in INTENT_RULES if re.search(rule.pattern, clause)), None)
         if rule is None:
-            by_id["unknown"] = {"intent_id": "unknown", "category": "unknown", "terms": []}
+            by_id["unknown"] = {
+                "intent_id": "unknown", "category": "unknown", "terms": [], "customer_data_required": False,
+            }
             continue
-        by_id[rule.intent_id] = {
-            "intent_id": rule.intent_id,
+        requires_account = rule.intent_id == "account_status" or (
+            rule.intent_id == "subscription_status" and bool(re.search(r"\b(?:my|mine|me|i)\b", clause))
+        )
+        intent_id = (
+            PERSONAL_SUBSCRIPTION_INTENT if rule.intent_id == "subscription_status" and requires_account
+            else rule.intent_id
+        )
+        by_id[intent_id] = {
+            "intent_id": intent_id,
             "category": rule.category,
             "terms": list(rule.terms),
+            "customer_data_required": requires_account,
         }
-        if rule.intent_id == "account_status" or (
-            rule.intent_id == "subscription_status" and re.search(r"\b(?:my|mine|me|i)\b", clause)
-        ):
-            requires_account = True
     return {
         "intents": list(by_id.values()),
         "human_support_requested": bool(HUMAN_REQUEST.search(text)),
         "sensitive_action_requested": sensitive_action_requested,
-        "customer_data_required": requires_account,
+        "customer_data_required": any(intent["customer_data_required"] for intent in by_id.values()),
     }

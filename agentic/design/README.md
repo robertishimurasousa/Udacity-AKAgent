@@ -22,7 +22,7 @@ The demo uses the local interface and examples from chat and email, with the sam
 
 The supervisor routes high-urgency tickets, sensitive action requests, and explicit requests for human support directly to escalation. General questions go to the knowledge specialist. Account-specific requests go to the account specialist first, followed by article retrieval. Failure of a required tool, missing evidence, and classification or generation failures trigger escalation with an explicit reason. If the model is unavailable, the escalation agent uses a template with the category, reason, and lookups performed.
 
-The [initial ticket workflow](../support_workflow.py) connects a rules-based English classifier, the supervisor, and the retrieval subgraph. It records whether the next step is resolution, account lookup, or escalation, along with the reason. The diagram below shows the full planned workflow.
+The [initial ticket workflow](../support_workflow.py) connects a rules-based English classifier, the supervisor, retrieval, optional read-only account lookups, and an initial resolver. The resolver quotes articles for general guidance and uses verified lookup fields for personalized facts. The diagram below shows the full planned workflow, including human handoff and persistence.
 
 ```mermaid
 flowchart TD
@@ -59,16 +59,18 @@ The [retrieval subgraph](../agents/knowledge.py) takes `account_id` and a list o
 
 The resolver receives only the retrieved articles and the authorized facts necessary for the case. The response uses validated excerpts and structured tool fields. Ticket text, history, and article content are treated as data. The initial customer preference is response format. The application applies the customer's choice of a concise or step-by-step response when rendering the output. Support policies come from the current knowledge base.
 
+The initial resolver selects marked customer-facing excerpts from the ranked articles. General answers use the article's `Suggested phrasing` section. Personalized answers pair the lookup facts with a separate `Account guidance` excerpt. If none of the qualifying articles provides the required excerpt, the workflow reports insufficient evidence.
+
 For verified customer-specific facts, use the lookup result. If a plan article lists four experiences per month and `lookup_subscription` returns seven for the verified customer, report seven as that customer's quota. Use the article for applicable general guidance and omit the conflicting generic amount from the personalized answer. If the required lookup fails or the applicable policy remains unclear, escalate.
 
 ## Support tools and data
 
 | Tool | Source | Expected result |
 | --- | --- | --- |
-| `lookup_account` | `User` in CultPass SQLite | Customer identifier and account status, including whether the account is blocked. |
+| `lookup_account` | `User` in CultPass SQLite | Status for the verified customer, including whether the account is blocked. |
 | `lookup_subscription` | The customer's `Subscription` in CultPass SQLite | Status, plan, and monthly quota when the customer has a subscription. |
 
-The tools receive the identity verified by the service, validate their inputs, and return `ok`, `not_found`, `invalid_input`, `forbidden`, or `unavailable`, with defined fields for each result. A registered customer without a subscription receives `ok` with `has_subscription=false`. The resolver can report that fact when an applicable article is available. The `not_found` status means the identity has no CultPass record and leads to escalation when the lookup is required. Data access and SQLAlchemy queries live in `agentic/tools/`. A blocked account leads to escalation. The interface supplies both database paths when building the graph, with defaults relative to the package root and resolved from the application file.
+The tools receive the identity verified by the service, validate their inputs, and return `ok`, `not_found`, `invalid_input`, `forbidden`, or `unavailable`, with defined fields for each result. A registered customer without a subscription receives `ok` with `has_subscription=false`. The resolver can report that fact when an applicable article is available. The `not_found` status means the identity has no CultPass record and leads to escalation when the lookup is required. Data access and SQLAlchemy queries live in `agentic/tools/`. A blocked account leads to escalation. The current graph accepts a knowledge database path and an optional CultPass database path. The caller passes the verified customer context separately from the ticket text.
 
 The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create the CultPass and UDA-Hub SQLite databases in separate directories. The knowledge base contains four original starter articles and 16 project-authored examples covering technical support, billing, account management, and reservations. Tests use deterministic synthetic data in place of the randomly generated values from the CultPass notebook.
 
