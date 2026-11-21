@@ -6,10 +6,13 @@ import sqlite3
 from tempfile import TemporaryDirectory
 import unittest
 
+import httpx
+from openai import OpenAI
 from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
 
+from agentic.agents.provider import build_openai_reviewer
 from agentic.support_workflow import build_support_graph
 from data.models.udahub import Account, Base, Knowledge
 
@@ -32,8 +35,10 @@ class HandoffMemoryTests(unittest.TestCase):
                 for index, article in enumerate(rows, start=1)
             ])
 
-    def invoke_memory(self, text, *, ticket="ticket-1", turn="turn-1", customer="sam", path=None):
-        graph = build_support_graph(self.knowledge_db, memory_database_path=path or self.memory_db)
+    def invoke_memory(self, text, *, ticket="ticket-1", turn="turn-1", customer="sam", path=None, trace_path=None):
+        graph = build_support_graph(
+            self.knowledge_db, memory_database_path=path or self.memory_db, trace_path=trace_path,
+        )
         return graph.invoke({
             "account_id": "cultpass",
             "verified_customer": {"account_id": "cultpass", "external_user_id": customer},
@@ -96,13 +101,177 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(turns[0][0], "turn-1")
         self.assertNotIn("example-secret-marker", turns[0][1])
 
-    def test_memory_failure_is_visible_and_keeps_general_guidance_available(self):
+    def test_unavailable_database_at_recall_blocks_completion(self):
         inaccessible = self.memory_db.parent / "missing-directory" / "memory.db"
         result = self.invoke_memory("I forgot my password.", path=inaccessible)
 
-        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual(result["decision"], {
+            "next_step": "operational_error", "reason": "history_unavailable",
+        })
         self.assertEqual(result["memory_status"], "unavailable")
+        self.assertIsNone(result.get("response"))
+        self.assertIsNone(result.get("handoff"))
         self.assertFalse(inaccessible.exists())
+
+    def test_aborted_history_write_changes_the_outcome_and_can_be_retried(self):
+        trace_path = self.memory_db.with_suffix(".jsonl")
+        self.invoke_memory("I forgot my password.")
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            db.execute("""
+                CREATE TRIGGER reject_turn BEFORE INSERT ON support_turns
+                BEGIN SELECT RAISE(ABORT, 'test write failed'); END
+            """)
+
+        for text in ("I forgot my password.", "Please issue a refund.", "Please answer step by step."):
+            with self.subTest(text=text):
+                result = self.invoke_memory(text, turn="turn-2", trace_path=trace_path)
+                self.assertEqual(result["decision"], {
+                    "next_step": "operational_error", "reason": "history_write_failed",
+                })
+                self.assertEqual(result["memory_status"], "unavailable")
+                self.assertIsNone(result.get("response"))
+                self.assertIsNone(result.get("handoff"))
+
+        events = [json.loads(line) for line in trace_path.read_text(encoding="utf-8").splitlines()]
+        failures = [event for event in events if event["event"] == "finish"]
+        self.assertEqual(len(failures), 3)
+        for event in failures:
+            self.assertEqual(event["turn_id"], "turn-2")
+            self.assertEqual(event["decision"]["next_step"], "operational_error")
+            self.assertEqual(event["memory_status"], "unavailable")
+
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            self.assertEqual(db.execute("SELECT turn_id FROM support_turns").fetchall(), [("turn-1",)])
+            db.execute("DROP TRIGGER reject_turn")
+        retry = self.invoke_memory("Please answer step by step.", turn="turn-2")
+        self.assertEqual(retry["memory_status"], "saved")
+        self.assertEqual(retry["decision"]["reason"], "preference_saved")
+        later = self.invoke_memory("I forgot my password.", turn="turn-3")
+        self.assertEqual(later["memory"]["response_style"], "step_by_step")
+
+    def test_provider_reviews_grounded_answer_without_ticket_context(self):
+        reviews = []
+
+        def approve(response, account_evidence):
+            reviews.append((response, account_evidence))
+            return "approved"
+
+        graph = build_support_graph(self.knowledge_db, evidence_reviewer=approve)
+        result = graph.invoke({
+            "account_id": "cultpass", "text": "I forgot my password for example-private-marker.",
+            "verified_customer": {"account_id": "cultpass", "external_user_id": "private-id"},
+        })
+
+        self.assertEqual(result["decision"]["next_step"], "resolve")
+        [(draft, account_evidence)] = reviews
+        self.assertEqual(draft, result["response"])
+        self.assertTrue(draft["citations"])
+        self.assertIsNone(account_evidence)
+        self.assertNotIn("example-private-marker", str(reviews))
+        self.assertNotIn("private-id", str(reviews))
+
+    def test_provider_refusal_or_failure_escalates_without_returning_the_draft(self):
+        for verdict in ("rejected", "unavailable"):
+            with self.subTest(verdict=verdict):
+                graph = build_support_graph(self.knowledge_db, evidence_reviewer=lambda *_: verdict)
+                result = graph.invoke({"account_id": "cultpass", "text": "I forgot my password."})
+                self.assertEqual(result["decision"]["next_step"], "escalate")
+                self.assertEqual(result["handoff"]["reason"], f"provider_{verdict}")
+                self.assertIsNone(result.get("response"))
+
+    def test_openai_adapter_escalates_on_http_failure_or_unexpected_structured_output(self):
+        failure = {"error": {"message": "Simulated service outage"}}
+        unexpected = {
+            "status": "completed",
+            "output": [{"type": "message", "content": [{
+                "type": "output_text",
+                "text": json.dumps({"verdict": "approved", "citations": ["invented-article"]}),
+            }]}],
+        }
+        responses = {
+            "outage": httpx.Response(503, json=failure),
+            "extra field": httpx.Response(200, json=unexpected),
+            "invalid JSON": httpx.Response(200, content=b"{", headers={"content-type": "application/json"}),
+            "invalid encoding": httpx.Response(200, content=b"\xff", headers={"content-type": "application/json"}),
+            "HTML gateway": httpx.Response(200, text="<html>Gateway failure</html>"),
+        }
+        for case, response in responses.items():
+            with self.subTest(case=case):
+                def handle(request):
+                    payload = json.loads(request.content)
+                    self.assertFalse(payload["store"])
+                    self.assertNotIn("private-input", payload["input"])
+                    return response
+
+                with OpenAI(
+                    api_key="synthetic-test-key", max_retries=0,
+                    http_client=httpx.Client(transport=httpx.MockTransport(handle)),
+                ) as client:
+                    graph = build_support_graph(self.knowledge_db, evidence_reviewer=build_openai_reviewer(client))
+                    result = graph.invoke({
+                        "account_id": "cultpass", "text": "I forgot my password for private-input.",
+                    })
+                self.assertEqual(result["decision"]["reason"], "provider_unavailable")
+                self.assertIn("review this ticket", result["handoff"]["summary"])
+                self.assertIsNone(result.get("response"))
+
+    def test_replaying_a_saved_turn_keeps_its_original_provider_verdict(self):
+        ticket = {
+            "account_id": "cultpass", "text": "I forgot my password.",
+            "ticket_id": "ticket-1", "turn_id": "turn-1",
+            "verified_customer": {"account_id": "cultpass", "external_user_id": "sam"},
+        }
+        winner = build_support_graph(
+            self.knowledge_db, memory_database_path=self.memory_db,
+            evidence_reviewer=lambda *_: "approved",
+        )
+
+        def reject_after_winner_saves(*_):
+            self.assertEqual(winner.invoke(ticket)["memory_status"], "saved")
+            return "rejected"
+
+        contender = build_support_graph(
+            self.knowledge_db, memory_database_path=self.memory_db,
+            evidence_reviewer=reject_after_winner_saves,
+        )
+        for replay in (contender.invoke(ticket), winner.invoke(ticket)):
+            self.assertEqual(replay["memory_status"], "replayed")
+            self.assertEqual(replay["decision"]["next_step"], "resolve")
+            self.assertEqual(replay["provider_verdict"], "approved")
+            self.assertIsNone(replay.get("handoff"))
+
+    def test_trace_filters_steps_by_ticket_and_turn_and_omits_messages(self):
+        path = self.memory_db.with_suffix(".jsonl")
+        graph = build_support_graph(
+            self.knowledge_db, memory_database_path=self.memory_db, trace_path=path,
+            evidence_reviewer=lambda *_: "approved",
+        )
+        ticket = {
+            "account_id": "cultpass", "verified_customer": {
+                "account_id": "cultpass", "external_user_id": "private-profile-marker",
+            },
+            "ticket_id": "t-1", "turn_id": "turn-1",
+            "text": "I forgot my password for private-body-marker.",
+        }
+        graph.invoke(ticket)
+        graph.invoke({**ticket, "turn_id": "turn-2", "text": "How do I assemble a telescope?"})
+        graph.invoke(ticket)
+        raw = path.read_text(encoding="utf-8")
+        events = [event for line in raw.splitlines() if
+                  (event := json.loads(line))["ticket_id"] == "t-1" and event["turn_id"] == "turn-1"]
+
+        self.assertEqual([event["event"] for event in events], [
+            "classify", "supervisor", "retrieve_knowledge", "resolve", "provider_review",
+            "finish", "finish",
+        ])
+        self.assertEqual(events[0]["categories"], ["access"])
+        self.assertGreaterEqual(events[2]["intents"][0]["candidates"][0]["score"], 0.60)
+        self.assertEqual(events[4]["verdict"], "approved")
+        self.assertEqual(events[5]["memory_status"], "saved")
+        self.assertEqual(events[6]["memory_status"], "replayed")
+        self.assertNotIn("private-profile-marker", raw)
+        self.assertNotIn("private-body-marker", raw)
+        self.assertNotIn("Forgot Password", raw)
 
     def test_memory_cannot_alias_either_read_only_database(self):
         link = self.memory_db.with_name("link.db")
@@ -121,7 +290,7 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(self.knowledge_db.read_bytes(), before)
         self.assertEqual(external.read_bytes(), b"")
 
-    def test_corrupt_intents_are_unavailable_without_interrupting_the_ticket(self):
+    def test_corrupt_intents_block_completion_when_history_is_required(self):
         self.invoke_memory("I forgot my password.")
         with closing(sqlite3.connect(self.memory_db)) as db, db:
             db.execute("UPDATE support_turns SET intents = 'null'")
@@ -130,7 +299,7 @@ class HandoffMemoryTests(unittest.TestCase):
         new_ticket = self.invoke_memory("I forgot my password.", ticket="ticket-2")
 
         for result in (same_ticket, new_ticket):
-            self.assertEqual(result["decision"]["next_step"], "resolve")
+            self.assertEqual(result["decision"]["next_step"], "operational_error")
             self.assertEqual(result["memory_status"], "unavailable")
             self.assertNotIn("memory", result)
 
@@ -228,7 +397,8 @@ class HandoffMemoryTests(unittest.TestCase):
         result = self.invoke_memory("I forgot my password.")
 
         self.assertEqual(result["memory_status"], "unavailable")
-        self.assertIn("Forgot Password", result["response"]["text"])
+        self.assertEqual(result["decision"]["next_step"], "operational_error")
+        self.assertIsNone(result.get("response"))
 
     def test_legacy_database_preserves_metadata_and_accepts_new_messages(self):
         with closing(sqlite3.connect(self.memory_db)) as db, db:
