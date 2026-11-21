@@ -40,9 +40,11 @@ class HistoryTurn(TypedDict):
     handoff: NotRequired[Handoff]
 
 
+SECRET_VALUE = r"""(?:"(?:\\.|[^"\\])*(?:"|$)|'(?:\\.|[^'\\])*(?:'|$)|[^\s,;"']+)"""
 SECRET = re.compile(
-    r"(?i)\b(?:[a-z0-9_]*(?:api_key|token|secret|password)\s*=\s*[^\s,;]+"
-    r"|bearer\s+[a-z0-9_.-]+|sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,})"
+    r"\b(?:[a-z0-9_]*(?:api_key|token|secret|password)\s*[:=]\s*" + SECRET_VALUE
+    + r"|bearer\s+[a-z0-9_.-]+|sk-[a-z0-9_-]{8,}|ghp_[a-z0-9]{8,})",
+    re.IGNORECASE,
 )
 EMAIL = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 
@@ -79,7 +81,38 @@ def _decode_outcome(value: str | None) -> StoredOutcome | None:
         or not isinstance(decoded["decision"].get("reason"), str)
     ):
         raise ValueError("Invalid recorded outcome in the history database.")
+    classification = decoded["classification"]
+    _validate_intents(classification.get("intents"))
+    if not all(isinstance(classification.get(key), bool) for key in (
+        "human_support_requested", "sensitive_action_requested", "customer_data_required",
+    )):
+        raise ValueError("Invalid recorded classification in the history database.")
+
+    if decoded["decision"]["next_step"] == "resolve":
+        response = decoded.get("response")
+        if (
+            "handoff" in decoded or not _has_text_fields(response, "text")
+            or not isinstance(response.get("citations"), list)
+            or not all(
+                _has_text_fields(citation, "article_id", "intent_id", "title", "excerpt")
+                for citation in response["citations"]
+            )
+            or (decoded["decision"]["reason"] == "evidence_ready" and not response["citations"])
+        ):
+            raise ValueError("Invalid recorded response in the history database.")
+    else:
+        handoff = decoded.get("handoff")
+        if (
+            "response" in decoded or not _has_text_fields(handoff, "reason", "summary")
+            or not isinstance(handoff.get("actions"), list)
+            or not all(isinstance(action, str) for action in handoff["actions"])
+        ):
+            raise ValueError("Invalid recorded handoff in the history database.")
     return cast(StoredOutcome, decoded)
+
+
+def _has_text_fields(value: object, *fields: str) -> bool:
+    return isinstance(value, dict) and all(isinstance(value.get(field), str) and value[field].strip() for field in fields)
 
 
 def separate_memory_path(database: Path | str, *sources: Path | str | None) -> Path:
@@ -95,8 +128,7 @@ def separate_memory_path(database: Path | str, *sources: Path | str | None) -> P
     return history
 
 
-def _decode_intents(value: str) -> list[ClassifiedIntent]:
-    decoded = json.loads(value)
+def _validate_intents(decoded: object) -> list[ClassifiedIntent]:
     if not isinstance(decoded, list) or any(
         not isinstance(intent, dict)
         or not isinstance(intent.get("intent_id"), str)
@@ -108,6 +140,10 @@ def _decode_intents(value: str) -> list[ClassifiedIntent]:
     ):
         raise ValueError("Invalid classified intents in the history database.")
     return cast(list[ClassifiedIntent], decoded)
+
+
+def _decode_intents(value: str) -> list[ClassifiedIntent]:
+    return _validate_intents(json.loads(value))
 
 
 @contextmanager

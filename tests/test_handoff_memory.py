@@ -173,6 +173,7 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertFalse(other["response"]["text"].startswith("1. "))
 
     def test_standalone_preference_can_change_without_losing_the_ticket_topic(self):
+        baseline = self.invoke_memory("I forgot my password.", customer="alice")
         self.invoke_memory("Please answer step by step. I forgot my password.")
         updated = self.invoke_memory("Please keep your answers concise.", turn="turn-2")
         follow_up = self.invoke_memory("What should I do next?", turn="turn-3")
@@ -182,7 +183,10 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(follow_up["memory"]["response_style"], "concise")
         self.assertEqual(follow_up["decision"]["next_step"], "resolve")
         self.assertIn("Forgot Password", follow_up["response"]["text"])
+        self.assertIn("check spam or try again in a few minutes", follow_up["response"]["text"])
         self.assertFalse(follow_up["response"]["text"].startswith("1. "))
+        self.assertLess(len(follow_up["response"]["text"]), len(baseline["response"]["text"]))
+        self.assertEqual(follow_up["response"]["citations"], baseline["response"]["citations"])
 
     def test_preference_without_a_verified_profile_is_not_recorded(self):
         graph = build_support_graph(self.knowledge_db, memory_database_path=self.memory_db)
@@ -195,7 +199,11 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertFalse(self.memory_db.exists())
 
     def test_history_redacts_credentials_and_email_in_customer_message(self):
-        self.invoke_memory("I forgot my password. Email fake@example.test. OPENAI_API_KEY=sk-test-not-a-real-token")
+        self.invoke_memory(
+            "I forgot my password. Email fake@example.test. OPENAI_API_KEY=sk-test-not-a-real-token. "
+            "Password = \"synthetic phrase redaction-marker\"; password: synthetic-colon-marker; "
+            "token='synthetic-token-prefix,redaction-tail'."
+        )
         later = self.invoke_memory("How do I reserve a spot for an event?", turn="turn-2")
 
         self.assertIn("history", later["memory"])
@@ -204,6 +212,23 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertIn("[redacted]", message)
         self.assertNotIn("fake@example.test", message)
         self.assertNotIn("sk-test-not-a-real-token", message)
+        self.assertNotIn("redaction-marker", message)
+        self.assertNotIn("synthetic-colon-marker", message)
+        self.assertNotIn("redaction-tail", message)
+
+    def test_incomplete_stored_outcome_is_not_replayed_as_success(self):
+        self.invoke_memory("I forgot my password.")
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            db.execute("UPDATE support_turns SET outcome = ?", (json.dumps({
+                "classification": {},
+                "decision": {"next_step": "resolve", "reason": "evidence_ready"},
+                "response": None,
+            }),))
+
+        result = self.invoke_memory("I forgot my password.")
+
+        self.assertEqual(result["memory_status"], "unavailable")
+        self.assertIn("Forgot Password", result["response"]["text"])
 
     def test_legacy_database_preserves_metadata_and_accepts_new_messages(self):
         with closing(sqlite3.connect(self.memory_db)) as db, db:
