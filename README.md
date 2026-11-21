@@ -52,7 +52,7 @@ print(result["decision"])
 print(result.get("response"))
 ```
 
-The supervisor reports the next step and its reason. When the resolver can answer every detected intent, `resolve` includes a text response and citations. For guidance, the text quotes the selected article. `escalate` records that the case needs human handling.
+The supervisor reports the next step and its reason. When the resolver can answer every detected intent, `resolve` includes a text response and citations. For guidance, the text quotes the selected article. `escalate` includes a handoff summary with the reason, topics, and checks performed.
 
 To enable customer-specific answers, pass `cultpass_database_path="data/external/cultpass.db"` to `build_support_graph`. The caller must supply a `verified_customer` object with the account ID and external user ID from its trusted identity context. The workflow checks the account scope before looking up customer data. The resolver uses verified account facts for personalized statements and cites the relevant article. With only the knowledge database configured, a personalized ticket still returns `lookup_account` as the next step.
 
@@ -74,6 +74,14 @@ result = graph.invoke({
 ```
 
 The result contains up to three ranked candidates per intent and a status of `ready`, `insufficient_evidence`, or `unavailable`. Run the routing and retrieval tests with `.venv/bin/python -m unittest discover -s tests -v`.
+
+## Handoff and memory
+
+The handoff is part of the workflow output and can be reviewed locally. Delivery to a support queue is a later step.
+
+Enable history with `memory_database_path="data/core/udahub_history.db"` when building the graph. Supply `verified_customer`, `ticket_id`, and a distinct `turn_id` for each new turn. After resolving a ticket, a follow-up such as `What should I do next?` can reuse its last resolved intents. The workflow can also recall recent resolved topics from the same customer's other tickets.
+
+The initial memory store records outcome and classified intents in a separate SQLite file. Repeating the same turn ID leaves one stored record. The history omits ticket text and response bodies. Storage failures appear as `memory_status="unavailable"` in the result.
 
 ## Validation and delivery
 
