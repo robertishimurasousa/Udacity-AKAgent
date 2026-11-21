@@ -24,6 +24,25 @@ The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\pyth
 
 [`03_agentic_app.ipynb`](03_agentic_app.ipynb) runs the starter chat example. It requires a local `OPENAI_API_KEY` to call the provider. Keep any local `.env`, the virtual environment, and generated databases out of version control.
 
+## Knowledge retrieval
+
+After database setup, use the LangGraph retrieval subgraph with search terms grouped by intent. It reads the account's articles from SQLite without provider credentials.
+
+```python
+from agentic.agents.knowledge import build_knowledge_graph
+
+graph = build_knowledge_graph("data/core/udahub.db")
+result = graph.invoke({
+    "account_id": "cultpass",
+    "intents": [
+        {"intent_id": "login", "terms": ["password", "email"]},
+        {"intent_id": "booking", "terms": ["event", "reservation"]},
+    ],
+})["retrieval"]
+```
+
+The result contains up to three ranked candidates per intent and a status of `ready`, `insufficient_evidence`, or `unavailable`. Run the retrieval tests with `.venv/bin/python -m unittest discover -s tests -v`.
+
 ## Starter material and attribution
 
 The setup notebooks, sample workflow and utilities, data models, starter dependency list, and original seed data come from [Udacity's public course repository](https://github.com/udacity/cd14641-langgraph-multi-public/tree/70c4797e28153b765e3053c5f23cf54b88e1a38c/project). The original [Udacity license notice](LICENSE.md) accompanies that material. The first four articles are from the starter. The remaining 16 are project-authored examples for technical support, account management, billing, and reservations.
