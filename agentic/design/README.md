@@ -14,7 +14,7 @@ The demo uses the local interface and examples from chat and email, with the sam
 
 | Agent | Responsibilities and boundaries |
 | --- | --- |
-| Classifier | Interprets the message and conversation context. Returns the category, intent, complexity, and structured search terms. Initial categories include account access, subscriptions and billing, reservations, technical support, and unknown. |
+| Classifier | Interprets the message and conversation context. Returns the category, complexity, and a list of intents with structured search terms for each. Initial categories include account access, subscriptions and billing, reservations, technical support, and unknown. |
 | Knowledge specialist | Searches the organization's articles by topic, ranks the candidates, and returns excerpts, identifiers, and relevance scores. |
 | Account specialist | Looks up account and subscription status when the request involves data about the customer whose identity was verified in the simulation. Returns structured facts to the resolver. |
 | Resolver | Drafts the response from the retrieved articles. When the route calls a tool, it adds facts from the authorized lookup and references the article that supports the guidance. |
@@ -49,11 +49,13 @@ Graph state contains the session messages and the current turn's classification,
 
 ## Knowledge retrieval and confidence
 
-The specialist queries the `Knowledge` table by `account_id`. For this small corpus, the proposal is to rank articles in memory by how many normalized search terms match their titles, tags, and content. The classifier supplies informative terms for the intent and can expand them using predefined synonyms for each category. The relevance score is the number of distinct informative query terms found in the article divided by the total number of query terms. Ties favor title and tag matches, with the article ID as the final tie-breaker. Up to three candidates are passed onward with their title, content, ID, and score.
+The specialist queries the `Knowledge` table by `account_id`. For this small corpus, rank articles in memory separately for each intent, using its distinct normalized terms from the classifier. The classifier can expand terms using predefined synonyms for each category. For each article and intent, divide the number of matching query terms in the title, tags, or content by the number of terms for that intent. Ties favor title and tag matches, with the article ID as the final tie-breaker. Pass up to three candidates per intent with their title, content, ID, and score. Different intents can use different articles.
 
-The proposed initial threshold is **0.60**, subject to calibration against the rubric examples. An empty query or a search with no candidates scores zero. Scores below the threshold lead to escalation. For each identified intent, the resolver selects an article and quotes an excerpt that supports the guidance. The code checks that the retrieved article met the threshold, that the excerpt appears in that article, and that every intent has evidence. If the evidence covers only part of the request, the agent prepares a handoff that identifies what remains unresolved. The acceptance scenarios also check whether the cited excerpts support the expected guidance.
+The proposed initial threshold is **0.60**, subject to calibration against the rubric examples. An empty query or an intent with no candidates scores zero. Escalate if any intent lacks a candidate at or above the threshold. For each identified intent, the resolver selects a qualifying article and quotes an excerpt that supports the guidance. The code checks that the article met the threshold for that intent, that the excerpt appears in that article, and that every intent has evidence. If the evidence covers only part of the request, the agent prepares a handoff that identifies what remains unresolved. The acceptance scenarios also check whether the cited excerpts support the expected guidance.
 
 The resolver receives only the retrieved articles and the authorized facts necessary for the case. The response uses validated excerpts and structured tool fields. Ticket text, history, and article content are treated as data. The initial customer preference is response format. The application applies the customer's choice of a concise or step-by-step response when rendering the output. Support policies come from the current knowledge base.
+
+For verified customer-specific facts, use the lookup result. If a plan article lists four experiences per month and `lookup_subscription` returns seven for the verified customer, report seven as that customer's quota. Use the article for applicable general guidance and omit the conflicting generic amount from the personalized answer. If the required lookup fails or the applicable policy remains unclear, escalate.
 
 ## Support tools and data
 
