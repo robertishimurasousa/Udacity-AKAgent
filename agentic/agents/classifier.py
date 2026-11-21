@@ -1,3 +1,4 @@
+from collections.abc import Iterator
 from dataclasses import dataclass
 import re
 from typing import TypedDict
@@ -46,30 +47,48 @@ INTENT_RULES = (
     IntentRule("subscription", "billing", r"\b(?:subscription|plan benefits)\b", ("subscription", "benefits")),
 )
 
-CLAUSE_BOUNDARY = re.compile(r"[.!?;\n]+|\band\b")
+SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]+")
+CONJUNCTION = re.compile(r"\band\b(?=\s+\w+\s+\w)")
+CHANGE_VERBS = "cancel|pause|change|reset|reschedule"
+SHARED_ACTION_OBJECT = re.compile(rf"\b({CHANGE_VERBS})\s+and\s+(?=(?:{CHANGE_VERBS})\s+(?:my|the|this)\b)")
+HOW_TO_QUESTION = re.compile(r"^(?:how\b|(?:can|could|would) you (?:explain|tell me|show me) how\b)")
 COURTESY = re.compile(r"(?:hi|hello|hey|thanks|thank you|good morning|good afternoon|good evening)(?: there)?")
 HUMAN_REQUEST = re.compile(
     r"\b(?:(?:speak|talk) (?:to|with)|connect me to|transfer me to|want|need)\s+"
     r"(?:a\s+)?(?:human|person|support agent|representative)\b"
 )
-SENSITIVE_REQUEST = re.compile(
-    r"(?:^|\b(?:can you|could you|would you|please|i (?:want|need|would like) you to)\s*,?\s+)(?:"
+SENSITIVE_ACTION = (
+    r"(?:"
     r"refund\s+(?:this|that|my|the|me)\b|(?:issue|process)\s+(?:a|the|my)\s+refund\b|"
     r"(?:give|send)\s+(?:me|us)\s+(?:a|the|my)\s+refund\b|"
-    r"(?:cancel|pause|change|reset|reschedule)\b[^.!?;]*\b"
+    rf"(?:{CHANGE_VERBS})\b[^.!?;]*\b"
     r"(?:plan|subscription|account|email|password|payment|reservation|booking)\b)"
 )
+DIRECT_REQUEST = re.compile(
+    r"\b(?:can you|could you|would you|please|i (?:want|need|would like) you to)\s*,?\s+" + SENSITIVE_ACTION
+)
+IMPERATIVE_REQUEST = re.compile(SENSITIVE_ACTION)
+
+
+def _clauses(text: str) -> Iterator[tuple[str, bool]]:
+    for sentence in SENTENCE_BOUNDARY.split(text):
+        sentence = SHARED_ACTION_OBJECT.sub(r"\1 or ", sentence.strip())
+        shares_how_to = bool(HOW_TO_QUESTION.match(sentence))
+        for index, clause in enumerate(CONJUNCTION.split(sentence)):
+            yield clause.strip(" ,\t"), shares_how_to and index > 0
 
 
 def classify_ticket(text: str) -> TicketClassification:
     """Classify the English CultPass topics supported by the initial workflow."""
     text = normalize("NFKC", text).casefold()
-    clauses = [clause.strip(" ,\t") for clause in CLAUSE_BOUNDARY.split(text)]
     by_id: dict[str, ClassifiedIntent] = {}
     requires_account = False
-    for clause in clauses:
+    sensitive_action_requested = False
+    for clause, inherits_how_to in _clauses(text):
         if not clause or COURTESY.fullmatch(clause):
             continue
+        if DIRECT_REQUEST.search(clause) or (not inherits_how_to and IMPERATIVE_REQUEST.match(clause)):
+            sensitive_action_requested = True
         rule = next((rule for rule in INTENT_RULES if re.search(rule.pattern, clause)), None)
         if rule is None:
             by_id["unknown"] = {"intent_id": "unknown", "category": "unknown", "terms": []}
@@ -86,6 +105,6 @@ def classify_ticket(text: str) -> TicketClassification:
     return {
         "intents": list(by_id.values()),
         "human_support_requested": bool(HUMAN_REQUEST.search(text)),
-        "sensitive_action_requested": any(SENSITIVE_REQUEST.search(clause) for clause in clauses),
+        "sensitive_action_requested": sensitive_action_requested,
         "customer_data_required": requires_account,
     }

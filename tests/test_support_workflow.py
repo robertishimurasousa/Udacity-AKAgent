@@ -135,7 +135,11 @@ class SupportWorkflowTests(unittest.TestCase):
         )
 
     def test_leaves_cancellation_guidance_on_the_knowledge_route(self):
-        for text in ("How can I cancel my subscription?", "Can you explain how to cancel my subscription?"):
+        for text in (
+            "How can I cancel my subscription?",
+            "Can you explain how to cancel my subscription?",
+            "How can I cancel and pause my subscription?",
+        ):
             with self.subTest(ticket=text):
                 result = self.invoke(text)
                 self.assertEqual(result["decision"]["next_step"], "resolve")
@@ -143,6 +147,22 @@ class SupportWorkflowTests(unittest.TestCase):
                     result["retrieval"]["intents"][0]["candidates"][0]["title"],
                     "How to Cancel or Pause a Subscription",
                 )
+
+    def test_keeps_short_continuations_with_their_topic(self):
+        for text, intent_id in [
+            ("My app crashes and closes.", "app_crash"),
+            ("What is the subscription status and quota?", "subscription_status"),
+        ]:
+            with self.subTest(ticket=text):
+                result = self.invoke(text)
+                self.assertEqual(result["decision"]["next_step"], "resolve")
+                self.assertEqual([intent["intent_id"] for intent in result["retrieval"]["intents"]], [intent_id])
+
+    def test_preserves_how_to_context_in_a_second_question(self):
+        result = self.invoke("How can I reset my password and change my reservation?")
+
+        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual([intent["intent_id"] for intent in result["retrieval"]["intents"]], ["login", "booking_change"])
 
     def test_escalates_a_lookup_failure_for_a_guidance_ticket(self):
         missing = self.database.with_name("missing.db")
