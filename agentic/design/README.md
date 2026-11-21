@@ -1,12 +1,10 @@
 # UDA-Hub Architecture
 
-Proposal for review under [ROB-37](https://linear.app/deltaedgeai/issue/ROB-37). The first delivery handles CultPass support tickets locally. It answers using evidence from the knowledge base and customer records when needed, or prepares a handoff to human support. The [acceptance matrix](aceite.md) defines how to demonstrate the behavior described here.
+The UDA-Hub handles CultPass support tickets using articles and authorized account facts. It produces a cited response or prepares a handoff to human support. The [initial design review](https://linear.app/deltaedgeai/issue/ROB-37) and the [acceptance matrix](aceite.md) track the design and demonstration.
 
 ## Architecture choice
 
-The proposed pattern is a **Supervisor**, implemented as a `StateGraph` built from scratch in `agentic/workflow.py`. The supervisor applies routing rules to the structured classification, ticket metadata, and retrieved evidence. Each route can be tested with controlled inputs and compared with the route observed in a demo.
-
-A supervisor that lets the model delegate freely could explore more paths. For the initial CultPass release, the categories and two outcomes fit explicit transitions. The code enforces risk and data access rules. The agents interpret the message, select evidence, and draft the response or handoff summary.
+The **Supervisor** pattern is implemented as a `StateGraph` in [support_workflow.py](../support_workflow.py). The supervisor applies routing rules to the structured classification, ticket metadata, and retrieved evidence. The agents interpret the message, select evidence, and draft the response or handoff summary. Explicit transitions enforce risk and data access rules.
 
 The demo uses the local interface and examples from chat and email, with the same input contract for both channels. The application records the escalation decision for human review. External connectors, financial operations, changes to CultPass records, and MCP are outside the proposed scope.
 
@@ -14,21 +12,21 @@ The demo uses the local interface and examples from chat and email, with the sam
 
 | Agent | Responsibilities and boundaries |
 | --- | --- |
-| Classifier | Interprets the message and conversation context. Returns the category, complexity, and a list of intents with structured search terms for each. Initial categories include account access, subscriptions and billing, reservations, technical support, and unknown. |
+| Classifier | Interprets the message and conversation context. Returns intents with categories, search terms, and indicators for sensitive operations, human support, and account data. |
 | Knowledge specialist | Searches the organization's articles by topic, ranks the candidates, and returns excerpts, identifiers, and relevance scores. |
 | Account specialist | Looks up account and subscription status when the request involves data about the customer whose identity was verified in the simulation. Returns structured facts to the resolver. |
 | Resolver | Drafts the response from the retrieved articles. When the route calls a tool, it adds facts from the authorized lookup and references the article that supports the guidance. |
-| Escalation agent | Produces a customer message and a separate handoff summary for human support with the reason, actions attempted, and information still needed. |
+| Evidence reviewer | Optionally asks OpenAI for a structured verdict on the local draft using the quoted excerpts and authorized facts. |
+| Escalation agent | Produces a template-based handoff for human support with the reason, topics, and actions performed. |
 
 The supervisor routes high-urgency tickets, sensitive action requests, and explicit requests for human support directly to escalation. General questions go to the knowledge specialist. Account-specific requests go to the account specialist first, followed by article retrieval. Failure of a required tool, missing evidence, and classification or generation failures trigger escalation with an explicit reason. If the model is unavailable, the escalation agent uses a template with the category, reason, and lookups performed.
 
-The [initial ticket workflow](../support_workflow.py) connects a rules-based English classifier, the supervisor, retrieval, optional read-only account lookups, and an initial resolver. The resolver quotes articles for general guidance and uses verified lookup fields for personalized facts. The diagram below shows the full planned workflow, including human handoff and persistence.
-
 ```mermaid
 flowchart TD
-    Input["Ticket and metadata"] --> Context["Verify identity and load history"]
-    Context -->|"Ownership verified"| Classify["Classifier"]
-    Context -->|"Invalid identity or ownership"| Rejected["Reject input"]
+    Input["Ticket, metadata and trusted profile context"] --> Context["Recall history when scoped"]
+    Context -->|"New turn"| Classify["Classifier"]
+    Context -->|"Saved turn"| Output["Return outcome"]
+    Context -->|"History unavailable"| Error["Return operational error"]
     Classify --> Supervisor{"Supervisor"}
     Supervisor -->|"Customer data"| Account["Account specialist"]
     Supervisor -->|"General guidance"| Knowledge["Knowledge specialist"]
@@ -37,17 +35,21 @@ flowchart TD
     Account -->|"Blocked account or unavailable lookup"| Escalate
     Knowledge -->|"Sufficient evidence"| Resolve["Resolver"]
     Knowledge -->|"Insufficient evidence or unavailable search"| Escalate
-    Resolve -->|"Response with valid references"| Save["Persist messages and outcome"]
+    Resolve -->|"Cited draft with provider configured"| Review["Evidence reviewer"]
+    Resolve -->|"Local response or preference acknowledgement"| Save["Persist when history is enabled"]
+    Review -->|"Approved"| Save
+    Review -->|"Rejected or unavailable"| Escalate
     Resolve -->|"Failure or invalid evidence"| Escalate
     Escalate --> Save
-    Save --> Output["Return response or handoff"]
+    Save -->|"Success or history skipped"| Output
+    Save -->|"Write failed"| Error["Return operational error"]
 ```
 
 ## Contract and state
 
-The normalized input contains `account_id`, `ticket_id`, `turn_id`, the message text, channel, urgency, receipt date, and `external_user_id`. The `account_id` identifies the organization supported by UDA-Hub. In the local demo, the operator selects a preregistered synthetic profile. The interface resolves the organization and customer identity independently of the message and passes that context to the workflow. New tickets are linked to that identity. When a ticket is resumed, the service checks ownership in UDA-Hub before loading state or calling tools. The interface rejects unknown profiles and tickets owned by someone else. Identifiers entered in a message are treated as text. Selecting a profile simulates the identity provided by a support integration.
+The normalized input contains `account_id`, message text, optional channel and urgency, and optional ticket, turn and verified profile fields. The caller supplies the verified profile separately from the message. The CLI accepts a synthetic fixture ID to simulate a trusted connector. Full interface authentication and ticket ownership checks remain pending.
 
-Graph state contains the session messages and the current turn's classification, route, evidence, tool results, and outcome. Transient fields reset on each turn. The output includes a `resolved` or `escalated` status, the customer response, references to the articles used, and the relevance score when available. Escalated results also include the reason and a summary for support. Input or persistence failures are reported to the interface as operational errors. The interface shows a ticket as resolved only after persistence has been confirmed.
+Graph state contains remembered turns and the current turn's classification, route, evidence, tool results, and outcome. The output reports the decision and its reason, plus a cited response or handoff when applicable. Relevance scores remain available in the retrieval result. With scoped history enabled, an unavailable store or a rejected turn write produces `operational_error`. A repeated turn ID can be submitted after storage is restored.
 
 ## Knowledge retrieval and confidence
 
@@ -76,15 +78,12 @@ The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create t
 
 ## Sessions, persistence, and traceability
 
-The current implementation uses an optional local SQLite history file for customer messages, decisions, classified intents, and responses or handoffs. The store scopes history by organization, verified customer, and ticket. It replays completed turns and keeps a verified customer's explicit response-format preference across tickets. Existing metadata-only rows retain their original information when the schema is upgraded. A follow-up can reuse the last resolved intents, and a new ticket can inspect recent resolved topics for the same customer. The rest of this section describes the planned native checkpoint and full traceability model.
+The separate optional SQLite history file stores customer messages, decisions, classified intents, and responses or handoffs. It scopes the data by organization, verified customer, and ticket. Current-session follow-ups can reuse the last resolved intents. A new ticket can use preferences and inspect recent resolved topics from the same customer. Completed turn IDs replay the stored outcome, including after process restart. Metadata-only rows retain their original information during schema upgrades.
 
-- **Turn state.** LangGraph passes classifications, messages, evidence, and actions between nodes. The checkpoint uses a `thread_id` derived internally from the organization and ticket. It lets reviewers inspect the turn's messages and tool calls through the test session. The proposal uses a SQLite checkpointer to persist sessions in a local environment with serial writes.
-- **History and long-term memory.** `Ticket`, `TicketMetadata`, and `TicketMessage` store history and outcomes in the UDA-Hub SQLite database. A proposed preferences table keyed by organization and customer stores explicit response format choices. A new ticket can load preferences and summaries of resolved cases from the same customer, including after a restart. The query is scoped to that customer's history.
-- **Turn persistence.** Messages and outcomes are recorded before the application returns the output. A turn key scoped to the ticket lets the service retrieve an already saved response when a turn is retried. The checkpoint holds session state, and the UDA-Hub database records completed turns. After a restart without checkpoints, the application can recover persisted messages.
-- **Logs.** JSON events for each node include internal run, ticket, and turn IDs, along with the category, route, tool, outcome, score, and escalation reason where applicable. Searching by `ticket_id` or `turn_id` reconstructs the full trace. Provider configuration stays in the local environment and history stays in the UDA-Hub database. Diagnostic logs contain identifiers and structured results.
+LangGraph transfers turn state between nodes. Native checkpoint inspection by `thread_id` remains pending. The CLI writes a local JSONL trace with the ticket and turn IDs, route decisions, retrieval scores and article IDs, tool statuses, provider verdict and final outcome. Replays record their final decision and `replayed` status. Ticket and turn IDs must be opaque strings. Event fields exclude credentials, identity details, messages, responses, and excerpts.
 
 ## Delivery and validation
 
-Development and the planned GitHub submission use the repository root. A clean checkout must contain the code, setup notebooks, seed data, versioned dependencies, tests, these documents, and run instructions. The Python environment and databases are created locally. The application will have a documented entry point in the checkout. The course instructions specify a `solution/` folder. Acceptance of the repository-root layout is pending confirmation before submission.
+Development and the planned GitHub submission use the repository root. The [CLI](../../03_agentic_app.py) runs the local workflow with optional OpenAI review, using databases created by the setup notebooks. The course instructions specify a `solution/` folder. Acceptance of the repository-root layout is pending confirmation before submission.
 
-Tests will use controlled model responses and temporary databases to verify routes and failure cases without credentials. The academic demo will also exercise the configured provider with fictional tickets from the [acceptance matrix](aceite.md). The SQLite checkpoint dependency and final versions will be pinned after validating the implementation.
+Tests use controlled model responses and temporary databases to verify routes and failure cases without credentials. The [demo instructions](../../README.md#run-the-support-demo) cover review with the configured provider and log filtering. The [acceptance matrix](aceite.md) lists the expected outcomes.

@@ -1,7 +1,7 @@
 from functools import partial
 from pathlib import Path
 import sqlite3
-from typing import Literal, NotRequired, TypedDict
+from typing import Callable, Literal, Mapping, NotRequired, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
@@ -11,12 +11,14 @@ from agentic.agents.classifier import PERSONAL_SUBSCRIPTION_INTENT, TicketClassi
 from agentic.agents.escalation import Handoff, prepare_handoff
 from agentic.agents.knowledge import RetrievalResult, SearchIntent, build_knowledge_graph
 from agentic.agents.preferences import ResponseStyle, extract_preference, format_response
+from agentic.agents.provider import EvidenceReviewer, ReviewVerdict
 from agentic.agents.resolver import SupportResponse, compose_response
 from agentic.tools.cultpass import (
     AccountEvidence, VerifiedCustomer, lookup_account, lookup_subscription, validate_customer_scope,
 )
 from agentic.tools.memory import MemoryContext, MemoryScope, StoredOutcome, load_context, save_turn, separate_memory_path
 from agentic.tools.sqlite import read_only_engine
+from agentic.tools.trace import TraceStatus, append_event
 
 
 class TicketInput(TypedDict):
@@ -30,7 +32,7 @@ class TicketInput(TypedDict):
 
 
 class Decision(TypedDict):
-    next_step: Literal["retrieve_knowledge", "resolve", "escalate", "lookup_account"]
+    next_step: Literal["retrieve_knowledge", "resolve", "escalate", "lookup_account", "operational_error"]
     reason: str
 
 
@@ -43,6 +45,8 @@ class TicketOutput(TypedDict):
     handoff: NotRequired[Handoff | None]
     memory: NotRequired[MemoryContext]
     memory_status: NotRequired[Literal["saved", "skipped", "unavailable", "replayed", "legacy"]]
+    provider_verdict: NotRequired[ReviewVerdict | None]
+    trace_status: NotRequired[TraceStatus]
 
 
 class SupportState(TicketInput, TicketOutput):
@@ -76,6 +80,8 @@ def _classify(state: SupportState) -> dict[str, object]:
 
 
 def _supervise(state: SupportState) -> dict[str, Decision]:
+    if state.get("memory_status") == "unavailable":
+        return {"decision": {"next_step": "operational_error", "reason": "history_unavailable"}}
     classification = state["classification"]
     if state.get("urgency", "normal").casefold() == "high":
         return {"decision": {"next_step": "escalate", "reason": "high_urgency"}}
@@ -143,6 +149,20 @@ def _resolve(state: SupportState) -> dict[str, Decision | SupportResponse]:
     return {"response": format_response(response, style)}
 
 
+def _review_draft(state: SupportState, *, reviewer: EvidenceReviewer) -> dict[str, object]:
+    response = state.get("response")
+    if response is None or not response["citations"]:
+        return {}
+    verdict = reviewer(response, state.get("account_evidence"))
+    if verdict == "approved":
+        return {"provider_verdict": verdict}
+    return {
+        "provider_verdict": verdict,
+        "response": None,
+        "decision": {"next_step": "escalate", "reason": f"provider_{verdict}"},
+    }
+
+
 def _handoff(state: SupportState) -> dict[str, Handoff]:
     reason = state["decision"]["reason"]
     evidence = state.get("account_evidence")
@@ -150,13 +170,14 @@ def _handoff(state: SupportState) -> dict[str, Handoff]:
     account_checked = evidence is not None or subscription_checked or reason in {
         "account_blocked", "account_not_found", "account_unavailable",
     }
-    return {
-        "handoff": prepare_handoff(
-            state["classification"], reason, state.get("retrieval"),
-            account_checked=account_checked,
-            subscription_checked=subscription_checked,
-        ),
-    }
+    handoff = prepare_handoff(
+        state["classification"], reason, state.get("retrieval"),
+        account_checked=account_checked,
+        subscription_checked=subscription_checked,
+    )
+    if verdict := state.get("provider_verdict"):
+        handoff["actions"].append(f"provider:{verdict}")
+    return {"handoff": handoff}
 
 
 def _memory_scope(state: TicketInput) -> MemoryScope | None:
@@ -189,8 +210,6 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
     scope = _memory_scope(state)
     if scope is None:
         return {"memory_status": "skipped"}
-    if state.get("memory_status") == "unavailable":
-        return {"memory_status": "unavailable"}
     outcome: StoredOutcome = {
         "decision": dict(state["decision"]),
         "classification": state["classification"],
@@ -199,6 +218,8 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         outcome["response"] = response
     if (handoff := state.get("handoff")) is not None:
         outcome["handoff"] = handoff
+    if (verdict := state.get("provider_verdict")) is not None:
+        outcome["provider_verdict"] = verdict
     preference_request = state["decision"]["reason"] == "preference_saved"
     try:
         status, stored = save_turn(
@@ -206,13 +227,12 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
             outcome=outcome, requested_style=state.get("requested_style"),
         )
     except (sqlite3.Error, ValueError):
-        if preference_request:
-            return {
-                "memory_status": "unavailable",
-                "decision": {"next_step": "resolve", "reason": "preference_storage_unavailable"},
-                "response": {"text": "I couldn't save your response preference.", "citations": []},
-            }
-        return {"memory_status": "unavailable"}
+        return {
+            "memory_status": "unavailable",
+            "decision": {"next_step": "operational_error", "reason": "history_write_failed"},
+            "response": None,
+            "handoff": None,
+        }
     if stored is None:
         if preference_request:
             return {
@@ -223,10 +243,56 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         return {"memory_status": status}
     update: dict[str, object] = {**stored, "memory_status": status}
     if status == "replayed":
-        for key in ("response", "handoff", "retrieval", "account_evidence"):
+        for key in ("response", "handoff", "retrieval", "account_evidence", "provider_verdict"):
             if key in state and key not in stored:
                 update[key] = None
     return update
+
+
+def _trace_classification(state: SupportState) -> dict[str, object]:
+    intents = state["classification"]["intents"]
+    return {
+        "categories": sorted({intent["category"] for intent in intents}),
+        "intents": [intent["intent_id"] for intent in intents],
+    }
+
+
+def _trace_account(state: SupportState) -> dict[str, object]:
+    evidence = state.get("account_evidence") or {}
+    reason = state["decision"]["reason"]
+    tools = []
+    if account := evidence.get("account"):
+        tools.append({"name": "lookup_account", "status": account["status"]})
+    if subscription := evidence.get("subscription"):
+        tools.append({"name": "lookup_subscription", "status": subscription["status"]})
+    if reason.startswith("subscription_"):
+        tools = [
+            {"name": "lookup_account", "status": "ok"},
+            {"name": "lookup_subscription", "status": reason.removeprefix("subscription_")},
+        ]
+    elif reason.startswith("account_"):
+        status = "ok" if reason == "account_blocked" else reason.removeprefix("account_")
+        tools = [{"name": "lookup_account", "status": status}]
+    return {"tools": tools, "decision": state["decision"]}
+
+
+def _trace_retrieval(state: SupportState) -> dict[str, object]:
+    retrieval = state["retrieval"]
+    assert retrieval is not None
+    return {
+        "status": retrieval["status"],
+        "intents": [
+            {
+                "intent_id": intent["intent_id"],
+                "candidates": [
+                    {"article_id": hit["article_id"], "score": hit["score"]}
+                    for hit in intent["candidates"]
+                ],
+            }
+            for intent in retrieval["intents"]
+        ],
+        "decision": state["decision"],
+    }
 
 
 def build_support_graph(
@@ -234,17 +300,59 @@ def build_support_graph(
     *,
     cultpass_database_path: Path | str | None = None,
     memory_database_path: Path | str | None = None,
+    evidence_reviewer: EvidenceReviewer | None = None,
+    trace_path: Path | str | None = None,
 ) -> CompiledStateGraph:
-    """Build the ticket workflow with optional CultPass lookups and history."""
-    graph = StateGraph(SupportState, input_schema=TicketInput, output_schema=TicketOutput)
-    graph.add_node("classify", _classify)
-    graph.add_node("supervisor", _supervise)
-    graph.add_node("retrieve_knowledge", build_knowledge_graph(database_path))
-    graph.add_node("review_evidence", _supervise_retrieval)
-    graph.add_node("resolve", _resolve)
-    graph.add_node("prepare_handoff", _handoff)
+    """Build the ticket workflow with optional lookups, history, provider review and traces."""
+    trace_file = None
+    if trace_path is not None:
+        trace_file = separate_memory_path(
+            trace_path, database_path, cultpass_database_path, memory_database_path,
+        )
+        if trace_file.suffix != ".jsonl":
+            raise ValueError("The trace path must be a separate .jsonl file.")
 
-    completion = END
+    def traced(
+        event: str, node: Callable[[SupportState], Mapping[str, object]],
+        details: Callable[[SupportState], dict[str, object]],
+    ) -> Callable[[SupportState], Mapping[str, object]]:
+        if trace_file is None:
+            return node
+
+        def run(state: SupportState) -> dict[str, object]:
+            update = dict(node(state))
+            status = append_event(
+                trace_file, state.get("ticket_id"), state.get("turn_id"), event,
+                details({**state, **update}),
+            )
+            if state.get("trace_status") != "unavailable":
+                update["trace_status"] = status
+            return update
+
+        return run
+
+    def decision_details(state: SupportState) -> dict[str, object]:
+        return {"decision": state["decision"]}
+
+    graph = StateGraph(SupportState, input_schema=TicketInput, output_schema=TicketOutput)
+    graph.add_node("classify", traced("classify", _classify, _trace_classification))
+    graph.add_node("supervisor", traced("supervisor", _supervise, decision_details))
+    graph.add_node("retrieve_knowledge", build_knowledge_graph(database_path))
+    graph.add_node("review_evidence", traced("retrieve_knowledge", _supervise_retrieval, _trace_retrieval))
+    graph.add_node("resolve", traced("resolve", _resolve, lambda state: {
+        "draft_ready": state.get("response") is not None, "decision": state["decision"],
+    }))
+    graph.add_node("prepare_handoff", traced("handoff", _handoff, decision_details))
+
+    finish = END
+    if trace_file is not None:
+        finish = "finish"
+        graph.add_node(finish, traced("finish", lambda state: {}, lambda state: {
+            "decision": state["decision"], "memory_status": state.get("memory_status"),
+        }))
+        graph.add_edge(finish, END)
+
+    completion = finish
     if memory_database_path is not None:
         database = separate_memory_path(memory_database_path, database_path, cultpass_database_path)
         graph.add_node("recall", partial(_recall, database=database))
@@ -255,16 +363,17 @@ def build_support_graph(
             "recall", lambda state: "replay_turn" if "replay" in state else "classify",
             {"replay_turn": "replay_turn", "classify": "classify"},
         )
-        graph.add_edge("replay_turn", END)
-        graph.add_edge("remember", END)
+        graph.add_edge("replay_turn", finish)
+        graph.add_edge("remember", finish)
         completion = "remember"
     else:
         graph.add_edge(START, "classify")
 
-    account_route = END
+    account_route = finish
     if cultpass_database_path is not None:
         account_route = "lookup_account"
-        graph.add_node(account_route, partial(_lookup_customer, engine=read_only_engine(cultpass_database_path)))
+        lookup = partial(_lookup_customer, engine=read_only_engine(cultpass_database_path))
+        graph.add_node(account_route, traced(account_route, lookup, _trace_account))
         graph.add_conditional_edges(
             account_route,
             lambda state: state["decision"]["next_step"],
@@ -278,6 +387,7 @@ def build_support_graph(
         {
             "retrieve_knowledge": "retrieve_knowledge", "resolve": "resolve",
             "escalate": "prepare_handoff", "lookup_account": account_route,
+            "operational_error": finish,
         },
     )
     graph.add_edge("retrieve_knowledge", "review_evidence")
@@ -286,10 +396,21 @@ def build_support_graph(
         lambda state: state["decision"]["next_step"],
         {"resolve": "resolve", "escalate": "prepare_handoff"},
     )
+    after_resolve = completion
+    if evidence_reviewer is not None:
+        after_resolve = "provider_review"
+        graph.add_node(after_resolve, traced(
+            after_resolve, partial(_review_draft, reviewer=evidence_reviewer),
+            lambda state: {"verdict": state.get("provider_verdict", "skipped"), "decision": state["decision"]},
+        ))
+        graph.add_conditional_edges(
+            after_resolve, lambda state: state["decision"]["next_step"],
+            {"resolve": completion, "escalate": "prepare_handoff"},
+        )
     graph.add_conditional_edges(
         "resolve",
         lambda state: state["decision"]["next_step"],
-        {"resolve": completion, "escalate": "prepare_handoff"},
+        {"resolve": after_resolve, "escalate": "prepare_handoff"},
     )
     graph.add_edge("prepare_handoff", completion)
     return graph.compile()

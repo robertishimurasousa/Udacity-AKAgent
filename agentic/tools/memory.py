@@ -8,6 +8,7 @@ from typing import Iterator, Literal, NamedTuple, NotRequired, TypedDict, cast
 from agentic.agents.classifier import ClassifiedIntent, TicketClassification
 from agentic.agents.escalation import Handoff
 from agentic.agents.preferences import ResponseStyle
+from agentic.agents.provider import ReviewVerdict
 from agentic.agents.resolver import SupportResponse
 
 
@@ -29,6 +30,7 @@ class StoredOutcome(TypedDict):
     decision: dict[str, str]
     response: NotRequired[SupportResponse]
     handoff: NotRequired[Handoff]
+    provider_verdict: NotRequired[ReviewVerdict]
 
 
 class HistoryTurn(TypedDict):
@@ -87,6 +89,11 @@ def _decode_outcome(value: str | None) -> StoredOutcome | None:
         "human_support_requested", "sensitive_action_requested", "customer_data_required",
     )):
         raise ValueError("Invalid recorded classification in the history database.")
+
+    if "provider_verdict" in decoded and decoded["provider_verdict"] not in (
+        "approved", "rejected", "unavailable",
+    ):
+        raise ValueError("Invalid recorded provider verdict in the history database.")
 
     if decoded["decision"]["next_step"] == "resolve":
         response = decoded.get("response")
