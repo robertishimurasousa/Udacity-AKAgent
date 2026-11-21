@@ -11,7 +11,7 @@ This is the **Autonomous Knowledge Agent** project from Udacity's **Advanced Age
 
 ## Local setup
 
-Use Python 3.11. From the repository root, create a virtual environment and install the starter dependencies.
+Use Python 3.11. From the repository root, create a virtual environment and install the dependencies.
 
 ```sh
 python3.11 -m venv .venv
@@ -28,11 +28,34 @@ The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\pyth
 
 ### Model API credentials
 
-The setup notebooks, local ticket workflow, and tests run without a model API key. The [starter chat notebook](03_agentic_app.ipynb) calls the OpenAI API through the course example in `agentic/workflow.py`.
+The setup notebooks, local ticket workflow, and tests run without a model API key. For OpenAI review in the project demo, set `OPENAI_API_KEY` in the ignored `.env` file and run [03_agentic_app.py](03_agentic_app.py) with `--openai`. Set `OPENAI_MODEL` to override the default `gpt-4o-mini`. The adapter uses the OpenAI Responses API with a structured verdict and a 20-second client timeout. Validation used OpenAI SDK 3.57.0, Pydantic 2.14.4 and LangGraph 1.2.24.
 
-For that notebook, add your OpenAI API key to `OPENAI_API_KEY` in the ignored `.env` file at the repository root. The notebook loads the file with `python-dotenv`. For a course-issued Vocareum key, use the key together with the `OPENAI_BASE_URL` configured by Vocareum. [Vocareum Labs documentation](https://help.vocareum.com/en/articles/9341351-genai-in-vocareum-labs)
+The [starter chat notebook](03_agentic_app.ipynb) remains a course reference and uses the sample workflow in `agentic/workflow.py`. For a course-issued Vocareum key, that notebook uses the `OPENAI_BASE_URL` configured by Vocareum. [Vocareum Labs documentation](https://help.vocareum.com/en/articles/9341351-genai-in-vocareum-labs)
 
 Keep credentials, the virtual environment, and generated databases local. Use the private reporting channel for security reports. [Security policy](SECURITY.md)
+
+## Run the support demo
+
+After setting up both databases, run the following commands from the repository root. Omit `--openai` to run locally without an API key.
+
+```sh
+.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-login --turn-id first \
+  'I forgot my password. How can I sign in again?'
+
+demo_customer=$(sqlite3 data/external/cultpass.db \
+  "SELECT u.user_id FROM users u JOIN subscriptions s USING (user_id) WHERE u.is_blocked = 0 LIMIT 1;")
+.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-plan --turn-id first \
+  --demo-customer-id "$demo_customer" 'What is my subscription status and monthly quota?'
+
+.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-unknown --turn-id first \
+  'How do I assemble a telescope?'
+
+jq -c 'select(.ticket_id == "demo-plan" and .turn_id == "first")' .logs/uda-hub.jsonl
+```
+
+The profile flag supplies trusted context for the local synthetic fixture. It simulates a support connector and provides no authentication or ticket ownership checks. The OpenAI reviewer receives the drafted answer, its article excerpts, and the structured facts needed for the answer. It returns an approval or rejection. The workflow escalates if the review rejects the draft or is unavailable. Missing knowledge escalates before model review.
+
+The JSONL trace records classifications, routes, candidate article IDs and scores, tool statuses, provider verdicts, handoffs and final outcomes. Supply opaque ticket and turn IDs for correlation. Ticket bodies, responses, customer IDs and credentials stay outside the trace. A trace write failure is visible as `trace_status="unavailable"`.
 
 ## Ticket routing
 
@@ -81,7 +104,7 @@ The handoff is part of the workflow output and can be reviewed locally. Delivery
 
 Enable history with `memory_database_path="data/core/udahub_history.db"` when building the graph. Supply `verified_customer`, `ticket_id`, and a distinct `turn_id` for each new turn. After resolving a ticket, a follow-up such as `What should I do next?` can reuse its last resolved intents. The workflow can also recall recent resolved topics from the same customer's other tickets.
 
-The separate SQLite history file records the customer message, decision, and response with citations or handoff. The `memory.history` output contains the prior turns for that ticket. Repeating a completed turn ID in the same scope returns its stored outcome. Existing metadata-only rows remain available for context and lack a saved response to replay. Storage failures appear as `memory_status="unavailable"`.
+The separate SQLite history file records the customer message, decision, and response with citations or handoff. The `memory.history` output contains the prior turns for that ticket. Repeating a completed turn ID in the same scope returns its stored outcome. Existing metadata-only rows remain available for context and lack a saved response to replay. A failed write returns `operational_error` with the reason `history_write_failed`. The demo exits with status 1 in that case. After restoring storage, retry with the same ticket and turn IDs. A history read failure is visible as `memory_status="unavailable"`.
 
 Explicit requests such as `Please answer step by step.` and `Please keep your answers concise.` update the format for future tickets from the same verified profile. The workflow redacts common credential and email patterns from stored messages. Use synthetic tickets for the local demo.
 
@@ -94,3 +117,5 @@ Explicit requests such as `Please answer step by step.` and `Please keep your an
 ## Starter material and attribution
 
 The setup notebooks, sample workflow and utilities, data models, starter dependency list, and original seed data come from [Udacity's public course repository](https://github.com/udacity/cd14641-langgraph-multi-public/tree/70c4797e28153b765e3053c5f23cf54b88e1a38c/project). The original [Udacity license notice](LICENSE.md) accompanies that material. The first four articles are from the starter. The remaining 16 are project-authored examples for technical support, account management, billing, and reservations.
+
+The [lessons directory](lessons/) contains original examples and exercises from the four course lessons. The UDA-Hub runs with its project files and databases.
