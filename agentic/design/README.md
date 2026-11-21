@@ -66,7 +66,7 @@ For verified customer-specific facts, use the lookup result. If a plan article l
 
 The tools receive the identity verified by the service, validate their inputs, and return `ok`, `not_found`, `invalid_input`, `forbidden`, or `unavailable`, with defined fields for each result. A registered customer without a subscription receives `ok` with `has_subscription=false`. The resolver can report that fact when an applicable article is available. The `not_found` status means the identity has no CultPass record and leads to escalation when the lookup is required. Data access and SQLAlchemy queries live in `agentic/tools/`. A blocked account leads to escalation. The interface supplies both database paths when building the graph, with defaults relative to the package root and resolved from the application file.
 
-The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create the CultPass and UDA-Hub SQLite databases in separate directories. The knowledge base will contain the four original articles and at least ten additional articles covering topics such as technical support, billing, account management, and reservations. Tests use deterministic synthetic data in place of the randomly generated values from the CultPass notebook.
+The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create the CultPass and UDA-Hub SQLite databases in separate directories. The knowledge base contains four original starter articles and 16 project-authored examples covering technical support, billing, account management, and reservations. Tests use deterministic synthetic data in place of the randomly generated values from the CultPass notebook.
 
 ## Sessions, persistence, and traceability
 
@@ -77,6 +77,6 @@ The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create t
 
 ## Delivery and validation
 
-Development can take place at the repository root. The submission will be assembled in `solution/` with code, setup notebooks, seed data, versioned dependencies, tests, these documents, and run instructions. The Python environment and databases are created locally. The application will have a documented entry point inside the package.
+Development and the planned GitHub submission use the repository root. A clean checkout must contain the code, setup notebooks, seed data, versioned dependencies, tests, these documents, and run instructions. The Python environment and databases are created locally. The application will have a documented entry point in the checkout. The course instructions specify a `solution/` folder. Acceptance of the repository-root layout is pending confirmation before submission.
 
 Tests will use controlled model responses and temporary databases to verify routes and failure cases without credentials. The academic demo will also exercise the configured provider with fictional tickets from the [acceptance matrix](aceite.md). The SQLite checkpoint dependency and final versions will be pinned after validating the implementation.
