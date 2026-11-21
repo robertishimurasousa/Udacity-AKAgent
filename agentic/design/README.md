@@ -89,6 +89,6 @@ The CLI writes a local JSONL trace with the ticket and turn IDs, route decisions
 
 ## Delivery and validation
 
-Development and the planned GitHub submission use the repository root. The [CLI](../../03_agentic_app.py) runs the local workflow with optional OpenAI review, using databases created by the setup notebooks. The course instructions specify a `solution/` folder. Acceptance of the repository-root layout is pending confirmation before submission.
+The GitHub checkout places the project at the repository root. The upload archive uses the course template's `solution/` directory. The [CLI](../../03_agentic_app.py) runs the local workflow with optional OpenAI review. The [submission validator](../../validate_submission.py) cross-checks the architecture routes and exercises the technical rubric in a temporary copy.
 
 Tests use controlled model responses and temporary databases to verify routes and failure cases without credentials. The [demo instructions](../../README.md#run-the-support-demo) cover review with the configured provider and log filtering. The [acceptance matrix](aceite.md) lists the expected outcomes.

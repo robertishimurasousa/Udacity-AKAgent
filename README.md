@@ -7,7 +7,7 @@ UDA-Hub is a LangGraph support system for the fictional CultPass service. It cla
 This is the **Autonomous Knowledge Agent** project from Udacity's **Advanced Agentic AI Techniques** course, part of the **Agentic AI Engineer with LangChain and LangGraph** Nanodegree. [Course](https://www.udacity.com/course/advanced-agentic-ai-techniques--cd14641) · [Nanodegree](https://www.udacity.com/course/agentic-ai-engineer-with-langchain-and-langgraph--nd901)
 
 - [Architecture and workflow](agentic/design/README.md)
-- [Acceptance scenarios](agentic/design/aceite.md)
+- [Rubric checks and acceptance scenarios](agentic/design/aceite.md)
 
 ## Local setup
 
@@ -21,6 +21,20 @@ python3.11 -m venv .venv
 
 The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\python.exe`. In your notebook editor, select the interpreter from `.venv` and start the notebooks from the repository root so their relative paths resolve.
 
+### Review the submission
+
+From the directory containing this README, run:
+
+```sh
+.venv/bin/python -B validate_submission.py
+```
+
+The validator runs both setup notebooks, checks SQLite and the LangGraph routes, exercises the CLI with synthetic tickets, and runs the regression suite. It creates databases and logs in a temporary copy of the project. It reports the technical results for A01–A13 and exits with a nonzero status if a check fails. In a Git checkout, it also checks that generated files and local credentials stay outside the tracked submission. Udacity reviews the design and confirms the accepted submission format. [Acceptance matrix](agentic/design/aceite.md)
+
+Add `--openai` to the command to verify the live provider with two synthetic requests. The default uses local resolution and exercises provider failures with simulated responses in the test suite.
+
+### Create demo databases
+
 1. Run [`01_external_db_setup.ipynb`](01_external_db_setup.ipynb) to create `data/external/cultpass.db` with the synthetic CultPass data.
 2. Run [`02_core_db_setup.ipynb`](02_core_db_setup.ipynb) to load the 20 articles in [`cultpass_articles.jsonl`](data/external/cultpass_articles.jsonl) and create a sample ticket in `data/core/udahub.db`. The notebook requires at least 14 articles if you edit the dataset.
 
@@ -28,7 +42,7 @@ The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\pyth
 
 ### Model API credentials
 
-The setup notebooks, local ticket workflow, and tests run without a model API key. For OpenAI review in the project demo, set `OPENAI_API_KEY` in the ignored `.env` file and run [03_agentic_app.py](03_agentic_app.py) with `--openai`. Set `OPENAI_MODEL` to override the default `gpt-4o-mini`. The adapter uses the OpenAI Responses API with a structured verdict and a 20-second client timeout. Validation used OpenAI SDK 3.57.0, Pydantic 2.14.4 and LangGraph 1.2.24.
+The setup notebooks, local ticket workflow, and tests run without a model API key. For OpenAI review in the project demo, set `OPENAI_API_KEY` in the ignored `.env` file and run [03_agentic_app.py](03_agentic_app.py) with `--openai`. Set `OPENAI_MODEL` to override the default `gpt-4o-mini`. The adapter uses the OpenAI Responses API with a structured verdict and a 20-second client timeout. The reference environment uses Python 3.11, LangGraph 1.2.24, SQLite checkpointer 3.1.3 and OpenAI SDK 3.57.0. [Dependencies](requirements.txt)
 
 The [starter chat notebook](03_agentic_app.ipynb) remains a course reference and uses the sample workflow in `agentic/workflow.py`. For a course-issued Vocareum key, that notebook uses the `OPENAI_BASE_URL` configured by Vocareum. [Vocareum Labs documentation](https://help.vocareum.com/en/articles/9341351-genai-in-vocareum-labs)
 
@@ -36,18 +50,18 @@ Keep credentials, the virtual environment, and generated databases local. Use th
 
 ## Run the support demo
 
-After setting up both databases, run the following commands from the repository root. Omit `--openai` to run locally without an API key.
+After setting up both databases, run the following commands from the repository root. Add `--openai` to a CLI command to enable live review. For a saved ticket, use a fresh turn ID to review a new answer. Reusing a completed turn ID replays its saved result.
 
 ```sh
-.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-login --turn-id first \
+.venv/bin/python 03_agentic_app.py --ticket-id demo-login --turn-id first \
   'I forgot my password. How can I sign in again?'
 
 demo_customer=$(sqlite3 data/external/cultpass.db \
   "SELECT u.user_id FROM users u JOIN subscriptions s USING (user_id) WHERE u.is_blocked = 0 LIMIT 1;")
-.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-plan --turn-id first \
+.venv/bin/python 03_agentic_app.py --ticket-id demo-plan --turn-id first \
   --demo-customer-id "$demo_customer" 'What is my subscription status and monthly quota?'
 
-.venv/bin/python 03_agentic_app.py --openai --ticket-id demo-unknown --turn-id first \
+.venv/bin/python 03_agentic_app.py --ticket-id demo-unknown --turn-id first \
   'How do I assemble a telescope?'
 
 jq -c 'select(.ticket_id == "demo-plan" and .turn_id == "first")' .logs/uda-hub.jsonl
@@ -128,11 +142,10 @@ The inspection returns the current turn's message, route, evidence, and outcome 
 ## Validation and delivery
 
 - Run `.venv/bin/python -m unittest discover -s tests -v` from the repository root. The suite exercises SQLite retrieval, routing, identity boundaries, and grounded responses with synthetic data.
-- Use the [acceptance scenarios](agentic/design/aceite.md) to track the academic rubric. Check the setup and demo from a clean checkout before submitting the repository. The Udacity instructions mention a `solution/` folder. Acceptance of the repository-root layout is pending confirmation.
-- Scope and review evidence are tracked in the issue associated with each change. New behavior starts with a failing test. Changes are reviewed in a PR against the tested commit, and the issue records validation and integration. The milestone tracks assessment separately from local implementation.
+- The GitHub checkout keeps the project at the repository root. The upload archive places the same project inside `solution/`, as specified by the course template. Run the validator from the directory containing this README in either layout. [Udacity project template](https://github.com/udacity/cd14641-langgraph-multi-public/blob/70c4797e28153b765e3053c5f23cf54b88e1a38c/project/solution/README.md)
 
 ## Starter material and attribution
 
 The setup notebooks, sample workflow and utilities, data models, starter dependency list, and original seed data come from [Udacity's public course repository](https://github.com/udacity/cd14641-langgraph-multi-public/tree/70c4797e28153b765e3053c5f23cf54b88e1a38c/project). The original [Udacity license notice](LICENSE.md) accompanies that material. The first four articles are from the starter. The remaining 16 are project-authored examples for technical support, account management, billing, and reservations.
 
-The [lessons directory](lessons/) contains original examples and exercises from the four course lessons. The UDA-Hub runs with its project files and databases.
+The GitHub repository also includes original examples and exercises from the four course lessons under `lessons/`. Those materials are reference material. The upload archive contains the UDA-Hub project files.
