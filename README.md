@@ -1,53 +1,29 @@
-# README Template
+# UDA-Hub
 
-Below is a template provided for use when building your README file for students.
+UDA-Hub is a proposed multi-agent support system for CultPass, built for Udacity's *Advanced Agentic AI Techniques* course. This baseline contains the course starter and the project's architecture proposal. The workflow in `agentic/workflow.py` is the course example. The UDA-Hub agents, acceptance tests, and final submission package are planned in the design documents.
 
-# Project Title
+- [Architecture and workflow](agentic/design/README.md)
+- [Acceptance scenarios](agentic/design/aceite.md)
 
-Project description goes here.
+## Local setup
 
-## Getting Started
+Use Python 3.11. From the repository root, create a virtual environment and install the starter dependencies.
 
-Instructions for how to get a copy of the project running on your local machine.
-
-### Dependencies
-
-```
-Examples here
-```
-
-### Installation
-
-Step by step explanation of how to get a dev environment running.
-
-List out the steps
-
-```
-Give an example here
+```sh
+python3.11 -m venv .venv
+.venv/bin/python -m pip install -r requirements.txt
+.venv/bin/python -m pip check
 ```
 
-## Testing
+The commands above use macOS or Linux paths. On Windows, use `.venv\Scripts\python.exe`. In your notebook editor, select the interpreter from `.venv` and start the notebooks from the repository root so their relative paths resolve.
 
-Explain the steps needed to run any automated tests
+1. Run [`01_external_db_setup.ipynb`](01_external_db_setup.ipynb) to create `data/external/cultpass.db` with the synthetic CultPass data.
+2. Before running [`02_core_db_setup.ipynb`](02_core_db_setup.ipynb), expand `data/external/cultpass_articles.jsonl` to at least 14 articles. The starter ships with four. The notebook checks this minimum before loading the articles and creating the sample ticket in `data/core/udahub.db`.
 
-### Break Down Tests
+**Both notebooks recreate their database files when run.** Use a disposable checkout or back up any database whose contents you need to keep. Neither database setup notebook requires an API key.
 
-Explain what each test does and why
+[`03_agentic_app.ipynb`](03_agentic_app.ipynb) runs the starter chat example. It requires a local `OPENAI_API_KEY` to call the provider. Keep any local `.env`, the virtual environment, and generated databases out of version control.
 
-```
-Examples here
-```
-## Project Instructions
+## Starter material and attribution
 
-This section should contain all the student deliverables for this project.
-
-## Built With
-
-* [Item1](www.item1.com) - Description of item
-* [Item2](www.item2.com) - Description of item
-* [Item3](www.item3.com) - Description of item
-
-Include all items used to build project.
-
-## License
-[License](../LICENSE.md)
+The setup notebooks, sample workflow and utilities, data models, synthetic fixtures, and starter dependency list come from [Udacity's public course repository](https://github.com/udacity/cd14641-langgraph-multi-public/tree/70c4797e28153b765e3053c5f23cf54b88e1a38c/project). The original [Udacity license notice](LICENSE.md) accompanies that material. The architecture and acceptance scenarios describe this project's proposed implementation.
