@@ -3,6 +3,7 @@ from pathlib import Path
 import sqlite3
 from typing import Callable, Literal, Mapping, NotRequired, TypedDict
 
+from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import Engine
@@ -53,9 +54,24 @@ class SupportState(TicketInput, TicketOutput):
     intents: list[SearchIntent]
     requested_style: NotRequired[ResponseStyle]
     replay: NotRequired[StoredOutcome]
+    turn_input: NotRequired[TicketInput]
+    turn_complete: NotRequired[bool]
+
+
+class CheckpointTurn(TypedDict):
+    turn_input: TicketInput
 
 
 FOLLOW_UPS = {"what should i do next", "what do i do next", "what next", "what now", "and then"}
+
+
+def _start_turn(state: CheckpointTurn) -> dict[str, object]:
+    # Reset both optional inputs and derived results from any previous turn.
+    ticket = state["turn_input"]
+    return {
+        **dict.fromkeys(SupportState.__annotations__),
+        **{key: ticket[key] for key in TicketInput.__annotations__ if key in ticket},
+    }
 
 
 def _classify(state: SupportState) -> dict[str, object]:
@@ -83,10 +99,10 @@ def _supervise(state: SupportState) -> dict[str, Decision]:
     if state.get("memory_status") == "unavailable":
         return {"decision": {"next_step": "operational_error", "reason": "history_unavailable"}}
     classification = state["classification"]
-    if state.get("urgency", "normal").casefold() == "high":
+    if (state.get("urgency") or "normal").casefold() == "high":
         return {"decision": {"next_step": "escalate", "reason": "high_urgency"}}
     if state.get("requested_style") and not classification["intents"]:
-        if "memory" in state:
+        if state.get("memory") is not None:
             return {"decision": {"next_step": "resolve", "reason": "preference_saved"}}
         return {"decision": {"next_step": "escalate", "reason": "preference_storage_required"}}
     if classification["human_support_requested"]:
@@ -203,7 +219,11 @@ def _recall(state: TicketInput, *, database: Path) -> dict[str, object]:
 
 
 def _replay_turn(state: SupportState) -> dict[str, object]:
-    return {**state["replay"], "memory_status": "replayed"}
+    original_message = next((
+        turn.get("customer_message") for turn in state["memory"]["history"]
+        if turn["turn_id"] == state["turn_id"]
+    ), None)
+    return {**state["replay"], "memory_status": "replayed", "text": original_message}
 
 
 def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
@@ -222,7 +242,7 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         outcome["provider_verdict"] = verdict
     preference_request = state["decision"]["reason"] == "preference_saved"
     try:
-        status, stored = save_turn(
+        status, stored, original_message = save_turn(
             database, scope, turn_id=state["turn_id"], customer_message=state["text"],
             outcome=outcome, requested_style=state.get("requested_style"),
         )
@@ -243,6 +263,7 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         return {"memory_status": status}
     update: dict[str, object] = {**stored, "memory_status": status}
     if status == "replayed":
+        update["text"] = original_message
         for key in ("response", "handoff", "retrieval", "account_evidence", "provider_verdict"):
             if key in state and key not in stored:
                 update[key] = None
@@ -302,8 +323,9 @@ def build_support_graph(
     memory_database_path: Path | str | None = None,
     evidence_reviewer: EvidenceReviewer | None = None,
     trace_path: Path | str | None = None,
+    checkpointer: BaseCheckpointSaver | None = None,
 ) -> CompiledStateGraph:
-    """Build the ticket workflow with optional lookups, history, provider review and traces."""
+    """Build the workflow. Checkpointed callers send each ticket under `turn_input`."""
     trace_file = None
     if trace_path is not None:
         trace_file = separate_memory_path(
@@ -334,7 +356,13 @@ def build_support_graph(
     def decision_details(state: SupportState) -> dict[str, object]:
         return {"decision": state["decision"]}
 
-    graph = StateGraph(SupportState, input_schema=TicketInput, output_schema=TicketOutput)
+    input_schema = CheckpointTurn if checkpointer is not None else TicketInput
+    graph = StateGraph(SupportState, input_schema=input_schema, output_schema=TicketOutput)
+    entry = START
+    if checkpointer is not None:
+        entry = "start_turn"
+        graph.add_node(entry, _start_turn)
+        graph.add_edge(START, entry)
     graph.add_node("classify", traced("classify", _classify, _trace_classification))
     graph.add_node("supervisor", traced("supervisor", _supervise, decision_details))
     graph.add_node("retrieve_knowledge", build_knowledge_graph(database_path))
@@ -345,9 +373,9 @@ def build_support_graph(
     graph.add_node("prepare_handoff", traced("handoff", _handoff, decision_details))
 
     finish = END
-    if trace_file is not None:
+    if trace_file is not None or checkpointer is not None:
         finish = "finish"
-        graph.add_node(finish, traced("finish", lambda state: {}, lambda state: {
+        graph.add_node(finish, traced("finish", lambda state: {"turn_complete": True}, lambda state: {
             "decision": state["decision"], "memory_status": state.get("memory_status"),
         }))
         graph.add_edge(finish, END)
@@ -358,16 +386,16 @@ def build_support_graph(
         graph.add_node("recall", partial(_recall, database=database))
         graph.add_node("remember", partial(_remember, database=database))
         graph.add_node("replay_turn", _replay_turn)
-        graph.add_edge(START, "recall")
+        graph.add_edge(entry, "recall")
         graph.add_conditional_edges(
-            "recall", lambda state: "replay_turn" if "replay" in state else "classify",
+            "recall", lambda state: "replay_turn" if state.get("replay") is not None else "classify",
             {"replay_turn": "replay_turn", "classify": "classify"},
         )
         graph.add_edge("replay_turn", finish)
         graph.add_edge("remember", finish)
         completion = "remember"
     else:
-        graph.add_edge(START, "classify")
+        graph.add_edge(entry, "classify")
 
     account_route = finish
     if cultpass_database_path is not None:
@@ -413,4 +441,4 @@ def build_support_graph(
         {"resolve": after_resolve, "escalate": "prepare_handoff"},
     )
     graph.add_edge("prepare_handoff", completion)
-    return graph.compile()
+    return graph.compile(checkpointer=checkpointer)
