@@ -6,7 +6,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy import Engine
 
-from agentic.agents.classifier import TicketClassification, classify_ticket
+from agentic.agents.classifier import PERSONAL_SUBSCRIPTION_INTENT, TicketClassification, classify_ticket
 from agentic.agents.knowledge import RetrievalResult, SearchIntent, build_knowledge_graph
 from agentic.agents.resolver import SupportResponse, compose_response
 from agentic.tools.cultpass import AccountEvidence, VerifiedCustomer, lookup_account, lookup_subscription
@@ -82,7 +82,7 @@ def _lookup_customer(state: SupportState, *, engine: Engine) -> dict[str, Decisi
 
     evidence: AccountEvidence = {"account": account}
     if any(
-        intent["intent_id"] == "subscription_status" and intent["customer_data_required"]
+        intent["intent_id"] == PERSONAL_SUBSCRIPTION_INTENT
         for intent in state["classification"]["intents"]
     ):
         subscription = lookup_subscription(engine, account_id, customer)

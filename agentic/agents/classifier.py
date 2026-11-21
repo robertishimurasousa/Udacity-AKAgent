@@ -7,6 +7,9 @@ from unicodedata import normalize
 from agentic.agents.knowledge import SearchIntent
 
 
+PERSONAL_SUBSCRIPTION_INTENT = "personal_subscription_status"
+
+
 class ClassifiedIntent(SearchIntent):
     category: str
     customer_data_required: bool
@@ -49,7 +52,7 @@ INTENT_RULES = (
 )
 
 SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]+")
-CONJUNCTION = re.compile(r"\band\b(?=\s+\w+\s+\w)")
+CONJUNCTION = re.compile(r"\band\b(?!\s+(?:monthly quota|plan details)\b)(?=\s+\w+\s+\w)")
 CHANGE_VERBS = "cancel|pause|change|reset|reschedule"
 SHARED_ACTION_OBJECT = re.compile(rf"\b({CHANGE_VERBS})\s+and\s+(?=(?:{CHANGE_VERBS})\s+(?:my|the|this)\b)")
 HOW_TO_QUESTION = re.compile(r"^(?:how\b|(?:can|could|would) you (?:explain|tell me|show me) how\b)")
@@ -98,14 +101,15 @@ def classify_ticket(text: str) -> TicketClassification:
         requires_account = rule.intent_id == "account_status" or (
             rule.intent_id == "subscription_status" and bool(re.search(r"\b(?:my|mine|me|i)\b", clause))
         )
-        prior_intent = by_id.get(rule.intent_id)
-        by_id[rule.intent_id] = {
-            "intent_id": rule.intent_id,
+        intent_id = (
+            PERSONAL_SUBSCRIPTION_INTENT if rule.intent_id == "subscription_status" and requires_account
+            else rule.intent_id
+        )
+        by_id[intent_id] = {
+            "intent_id": intent_id,
             "category": rule.category,
             "terms": list(rule.terms),
-            "customer_data_required": requires_account or (
-                prior_intent["customer_data_required"] if prior_intent else False
-            ),
+            "customer_data_required": requires_account,
         }
     return {
         "intents": list(by_id.values()),
