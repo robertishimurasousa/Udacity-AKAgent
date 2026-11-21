@@ -33,7 +33,7 @@ class AccountEvidence(TypedDict):
     subscription: NotRequired[SubscriptionLookup]
 
 
-def _validate_scope(
+def validate_customer_scope(
     account_id: str, customer: VerifiedCustomer,
 ) -> Literal["forbidden", "invalid_input"] | None:
     if not isinstance(customer, dict) or not isinstance(customer.get("account_id"), str):
@@ -47,7 +47,7 @@ def _validate_scope(
 
 
 def lookup_account(engine: Engine, account_id: str, customer: VerifiedCustomer) -> AccountLookup:
-    error = _validate_scope(account_id, customer)
+    error = validate_customer_scope(account_id, customer)
     if error:
         return {"status": error}
     try:
@@ -63,7 +63,7 @@ def lookup_account(engine: Engine, account_id: str, customer: VerifiedCustomer) 
 
 
 def lookup_subscription(engine: Engine, account_id: str, customer: VerifiedCustomer) -> SubscriptionLookup:
-    error = _validate_scope(account_id, customer)
+    error = validate_customer_scope(account_id, customer)
     if error:
         return {"status": error}
     try:
