@@ -10,11 +10,12 @@ from sqlalchemy import Engine
 from agentic.agents.classifier import PERSONAL_SUBSCRIPTION_INTENT, TicketClassification, classify_ticket
 from agentic.agents.escalation import Handoff, prepare_handoff
 from agentic.agents.knowledge import RetrievalResult, SearchIntent, build_knowledge_graph
+from agentic.agents.preferences import ResponseStyle, extract_preference, format_response
 from agentic.agents.resolver import SupportResponse, compose_response
 from agentic.tools.cultpass import (
     AccountEvidence, VerifiedCustomer, lookup_account, lookup_subscription, validate_customer_scope,
 )
-from agentic.tools.memory import MemoryContext, MemoryScope, load_context, save_turn, separate_memory_path
+from agentic.tools.memory import MemoryContext, MemoryScope, StoredOutcome, load_context, save_turn, separate_memory_path
 from agentic.tools.sqlite import read_only_engine
 
 
@@ -36,25 +37,28 @@ class Decision(TypedDict):
 class TicketOutput(TypedDict):
     classification: TicketClassification
     decision: Decision
-    retrieval: NotRequired[RetrievalResult]
-    account_evidence: NotRequired[AccountEvidence]
-    response: NotRequired[SupportResponse]
-    handoff: NotRequired[Handoff]
+    retrieval: NotRequired[RetrievalResult | None]
+    account_evidence: NotRequired[AccountEvidence | None]
+    response: NotRequired[SupportResponse | None]
+    handoff: NotRequired[Handoff | None]
     memory: NotRequired[MemoryContext]
-    memory_status: NotRequired[Literal["saved", "skipped", "unavailable"]]
+    memory_status: NotRequired[Literal["saved", "skipped", "unavailable", "replayed", "legacy"]]
 
 
 class SupportState(TicketInput, TicketOutput):
     intents: list[SearchIntent]
+    requested_style: NotRequired[ResponseStyle]
+    replay: NotRequired[StoredOutcome]
 
 
 FOLLOW_UPS = {"what should i do next", "what do i do next", "what next", "what now", "and then"}
 
 
-def _classify(state: SupportState) -> dict[str, TicketClassification | list[SearchIntent]]:
-    classification = classify_ticket(state["text"])
+def _classify(state: SupportState) -> dict[str, object]:
+    text, requested_style = extract_preference(state["text"])
+    classification = classify_ticket(text)
     memory = state.get("memory")
-    if memory and state["text"].strip().casefold().rstrip(".?!") in FOLLOW_UPS:
+    if memory and text.strip().casefold().rstrip(".?!") in FOLLOW_UPS:
         previous = memory["session_intents"]
         if previous:
             classification["intents"] = previous
@@ -65,13 +69,20 @@ def _classify(state: SupportState) -> dict[str, TicketClassification | list[Sear
         {"intent_id": intent["intent_id"], "terms": intent["terms"]}
         for intent in classification["intents"]
     ]
-    return {"classification": classification, "intents": search_intents}
+    update: dict[str, object] = {"classification": classification, "intents": search_intents}
+    if requested_style is not None:
+        update["requested_style"] = requested_style
+    return update
 
 
 def _supervise(state: SupportState) -> dict[str, Decision]:
     classification = state["classification"]
     if state.get("urgency", "normal").casefold() == "high":
         return {"decision": {"next_step": "escalate", "reason": "high_urgency"}}
+    if state.get("requested_style") and not classification["intents"]:
+        if "memory" in state:
+            return {"decision": {"next_step": "resolve", "reason": "preference_saved"}}
+        return {"decision": {"next_step": "escalate", "reason": "preference_storage_required"}}
     if classification["human_support_requested"]:
         return {"decision": {"next_step": "escalate", "reason": "human_support_requested"}}
     if classification["sensitive_action_requested"]:
@@ -82,7 +93,9 @@ def _supervise(state: SupportState) -> dict[str, Decision]:
 
 
 def _supervise_retrieval(state: SupportState) -> dict[str, Decision]:
-    status = state["retrieval"]["status"]
+    retrieval = state["retrieval"]
+    assert retrieval is not None
+    status = retrieval["status"]
     if status == "ready":
         return {"decision": {"next_step": "resolve", "reason": "evidence_ready"}}
     reason = "knowledge_unavailable" if status == "unavailable" else "insufficient_evidence"
@@ -117,10 +130,17 @@ def _lookup_customer(state: SupportState, *, engine: Engine) -> dict[str, Decisi
 
 
 def _resolve(state: SupportState) -> dict[str, Decision | SupportResponse]:
-    response = compose_response(state["classification"], state["retrieval"], state.get("account_evidence"))
+    if state["decision"]["reason"] == "preference_saved":
+        style = "step-by-step" if state["requested_style"] == "step_by_step" else "concise"
+        return {"response": {"text": f"I'll use {style} answers for your future tickets.", "citations": []}}
+    retrieval = state["retrieval"]
+    assert retrieval is not None
+    response = compose_response(state["classification"], retrieval, state.get("account_evidence"))
     if response is None:
         return {"decision": {"next_step": "escalate", "reason": "insufficient_evidence"}}
-    return {"response": response}
+    memory = state.get("memory")
+    style = state.get("requested_style") or (memory["response_style"] if memory else None)
+    return {"response": format_response(response, style)}
 
 
 def _handoff(state: SupportState) -> dict[str, Handoff]:
@@ -150,30 +170,63 @@ def _memory_scope(state: TicketInput) -> MemoryScope | None:
     return MemoryScope(state["account_id"], customer["external_user_id"], ticket_id)
 
 
-def _recall(state: TicketInput, *, database: Path) -> dict[str, MemoryContext | str]:
+def _recall(state: TicketInput, *, database: Path) -> dict[str, object]:
     scope = _memory_scope(state)
     if scope is None:
         return {"memory_status": "skipped"}
     try:
-        return {"memory": load_context(database, scope)}
+        context, replay = load_context(database, scope, state["turn_id"])
     except (sqlite3.Error, ValueError):
         return {"memory_status": "unavailable"}
+    return {"memory": context, "replay": replay} if replay is not None else {"memory": context}
 
 
-def _remember(state: SupportState, *, database: Path) -> dict[str, str]:
+def _replay_turn(state: SupportState) -> dict[str, object]:
+    return {**state["replay"], "memory_status": "replayed"}
+
+
+def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
     scope = _memory_scope(state)
     if scope is None:
         return {"memory_status": "skipped"}
     if state.get("memory_status") == "unavailable":
         return {"memory_status": "unavailable"}
+    outcome: StoredOutcome = {
+        "decision": dict(state["decision"]),
+        "classification": state["classification"],
+    }
+    if (response := state.get("response")) is not None:
+        outcome["response"] = response
+    if (handoff := state.get("handoff")) is not None:
+        outcome["handoff"] = handoff
+    preference_request = state["decision"]["reason"] == "preference_saved"
     try:
-        save_turn(
-            database, scope, state["turn_id"], state["decision"]["next_step"],
-            state["classification"]["intents"],
+        status, stored = save_turn(
+            database, scope, turn_id=state["turn_id"], customer_message=state["text"],
+            outcome=outcome, requested_style=state.get("requested_style"),
         )
-    except sqlite3.Error:
+    except (sqlite3.Error, ValueError):
+        if preference_request:
+            return {
+                "memory_status": "unavailable",
+                "decision": {"next_step": "resolve", "reason": "preference_storage_unavailable"},
+                "response": {"text": "I couldn't save your response preference.", "citations": []},
+            }
         return {"memory_status": "unavailable"}
-    return {"memory_status": "saved"}
+    if stored is None:
+        if preference_request:
+            return {
+                "memory_status": status,
+                "decision": {"next_step": "resolve", "reason": "preference_turn_already_recorded"},
+                "response": {"text": "This turn already exists. Please submit the preference as a new turn.", "citations": []},
+            }
+        return {"memory_status": status}
+    update: dict[str, object] = {**stored, "memory_status": status}
+    if status == "replayed":
+        for key in ("response", "handoff", "retrieval", "account_evidence"):
+            if key in state and key not in stored:
+                update[key] = None
+    return update
 
 
 def build_support_graph(
@@ -196,8 +249,13 @@ def build_support_graph(
         database = separate_memory_path(memory_database_path, database_path, cultpass_database_path)
         graph.add_node("recall", partial(_recall, database=database))
         graph.add_node("remember", partial(_remember, database=database))
+        graph.add_node("replay_turn", _replay_turn)
         graph.add_edge(START, "recall")
-        graph.add_edge("recall", "classify")
+        graph.add_conditional_edges(
+            "recall", lambda state: "replay_turn" if "replay" in state else "classify",
+            {"replay_turn": "replay_turn", "classify": "classify"},
+        )
+        graph.add_edge("replay_turn", END)
         graph.add_edge("remember", END)
         completion = "remember"
     else:
@@ -217,7 +275,10 @@ def build_support_graph(
     graph.add_conditional_edges(
         "supervisor",
         lambda state: state["decision"]["next_step"],
-        {"retrieve_knowledge": "retrieve_knowledge", "escalate": "prepare_handoff", "lookup_account": account_route},
+        {
+            "retrieve_knowledge": "retrieve_knowledge", "resolve": "resolve",
+            "escalate": "prepare_handoff", "lookup_account": account_route,
+        },
     )
     graph.add_edge("retrieve_knowledge", "review_evidence")
     graph.add_conditional_edges(
