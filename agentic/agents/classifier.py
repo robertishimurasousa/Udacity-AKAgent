@@ -46,18 +46,16 @@ INTENT_RULES = (
     IntentRule("subscription", "billing", r"\b(?:subscription|plan benefits)\b", ("subscription", "benefits")),
 )
 
-CLAUSE_BOUNDARY = re.compile(
-    r"[.!?;\n]+|\b(?:and|also)\b(?=\s+(?:how|what|where|when|why|can|could|do|does|"
-    r"i|my|please|reset|reserve|book|cancel|change|check)\b)"
-)
+CLAUSE_BOUNDARY = re.compile(r"[.!?;\n]+|\band\b")
 COURTESY = re.compile(r"(?:hi|hello|hey|thanks|thank you|good morning|good afternoon|good evening)(?: there)?")
 HUMAN_REQUEST = re.compile(
-    r"\b(?:speak to|talk to|connect me to|transfer me to|want|need)\s+"
+    r"\b(?:(?:speak|talk) (?:to|with)|connect me to|transfer me to|want|need)\s+"
     r"(?:a\s+)?(?:human|person|support agent|representative)\b"
 )
 SENSITIVE_REQUEST = re.compile(
-    r"(?:^|\b(?:can you|could you|would you|please)\s+)(?:"
+    r"(?:^|\b(?:can you|could you|would you|please|i (?:want|need|would like) you to)\s*,?\s+)(?:"
     r"refund\s+(?:this|that|my|the|me)\b|(?:issue|process)\s+(?:a|the|my)\s+refund\b|"
+    r"(?:give|send)\s+(?:me|us)\s+(?:a|the|my)\s+refund\b|"
     r"(?:cancel|pause|change|reset|reschedule)\b[^.!?;]*\b"
     r"(?:plan|subscription|account|email|password|payment|reservation|booking)\b)"
 )
@@ -68,22 +66,23 @@ def classify_ticket(text: str) -> TicketClassification:
     text = normalize("NFKC", text).casefold()
     clauses = [clause.strip(" ,\t") for clause in CLAUSE_BOUNDARY.split(text)]
     by_id: dict[str, ClassifiedIntent] = {}
+    requires_account = False
     for clause in clauses:
         if not clause or COURTESY.fullmatch(clause):
             continue
         rule = next((rule for rule in INTENT_RULES if re.search(rule.pattern, clause)), None)
         if rule is None:
             by_id["unknown"] = {"intent_id": "unknown", "category": "unknown", "terms": []}
-        else:
-            by_id[rule.intent_id] = {
-                "intent_id": rule.intent_id,
-                "category": rule.category,
-                "terms": list(rule.terms),
-            }
-
-    requires_account = "account_status" in by_id or (
-        "subscription_status" in by_id and bool(re.search(r"\b(?:my|mine|me|i)\b", text))
-    )
+            continue
+        by_id[rule.intent_id] = {
+            "intent_id": rule.intent_id,
+            "category": rule.category,
+            "terms": list(rule.terms),
+        }
+        if rule.intent_id == "account_status" or (
+            rule.intent_id == "subscription_status" and re.search(r"\b(?:my|mine|me|i)\b", clause)
+        ):
+            requires_account = True
     return {
         "intents": list(by_id.values()),
         "human_support_requested": bool(HUMAN_REQUEST.search(text)),

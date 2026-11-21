@@ -71,12 +71,21 @@ class SupportWorkflowTests(unittest.TestCase):
         self.assertEqual([intent["intent_id"] for intent in result["retrieval"]["intents"]], ["login"])
 
     def test_escalates_a_ticket_when_only_one_question_has_evidence(self):
-        result = self.invoke("How can I reset my password, and how do I assemble a telescope?")
+        result = self.invoke("How can I reset my password and assemble a telescope?")
 
         self.assertEqual(result["decision"], {"next_step": "escalate", "reason": "insufficient_evidence"})
         known, unknown = result["retrieval"]["intents"]
         self.assertTrue(known["candidates"])
         self.assertEqual(unknown["candidates"], [])
+
+    def test_keeps_a_second_supported_intent_with_a_different_verb(self):
+        result = self.invoke("I forgot my password and need help with a duplicate charge.")
+
+        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual(
+            [intent["candidates"][0]["title"] for intent in result["retrieval"]["intents"]],
+            ["How to Handle Login Issues?", "Review an Unexpected or Duplicate Charge"],
+        )
 
     def test_high_urgency_bypasses_retrieval_for_an_otherwise_resolvable_ticket(self):
         result = self.invoke("I forgot my password.", urgency="high")
@@ -90,6 +99,10 @@ class SupportWorkflowTests(unittest.TestCase):
             ("Can you issue a refund for this charge?", "sensitive_action_requested"),
             ("Please change the email address on my account.", "sensitive_action_requested"),
             ("Cancel my subscription.", "sensitive_action_requested"),
+            ("Can I speak with a human about my reservation?", "human_support_requested"),
+            ("Please, cancel my subscription.", "sensitive_action_requested"),
+            ("I want you to cancel my subscription.", "sensitive_action_requested"),
+            ("Give me a refund for the duplicate charge.", "sensitive_action_requested"),
         ]:
             with self.subTest(reason=reason, text=text):
                 result = self.invoke(text)
@@ -111,6 +124,25 @@ class SupportWorkflowTests(unittest.TestCase):
                 result = self.invoke(text)
                 self.assertEqual(result["decision"], {"next_step": "lookup_account", "reason": "customer_data_required"})
                 self.assertNotIn("retrieval", result)
+
+    def test_uses_personalization_only_for_the_relevant_subscription_question(self):
+        result = self.invoke("I forgot my password. What is the monthly quota?")
+
+        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual(
+            [intent["intent_id"] for intent in result["retrieval"]["intents"]],
+            ["login", "subscription_status"],
+        )
+
+    def test_leaves_cancellation_guidance_on_the_knowledge_route(self):
+        for text in ("How can I cancel my subscription?", "Can you explain how to cancel my subscription?"):
+            with self.subTest(ticket=text):
+                result = self.invoke(text)
+                self.assertEqual(result["decision"]["next_step"], "resolve")
+                self.assertEqual(
+                    result["retrieval"]["intents"][0]["candidates"][0]["title"],
+                    "How to Cancel or Pause a Subscription",
+                )
 
     def test_escalates_a_lookup_failure_for_a_guidance_ticket(self):
         missing = self.database.with_name("missing.db")
