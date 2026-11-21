@@ -101,6 +101,15 @@ class AccountResolutionTests(unittest.TestCase):
             ["personal_subscription_status", "subscription_status"],
         )
 
+    def test_login_and_general_quota_do_not_require_a_customer_identity(self):
+        result = self.invoke_account("I need help with login and monthly quota.", customer=None)
+
+        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual(
+            [citation["intent_id"] for citation in result["response"]["citations"]],
+            ["login", "subscription_status"],
+        )
+
     def test_refund_guidance_quotes_customer_facing_content(self):
         graph = build_support_graph(self.core_database)
         result = graph.invoke({"account_id": "cultpass", "text": "How do I request a refund?"})

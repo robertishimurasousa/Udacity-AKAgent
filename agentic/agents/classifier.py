@@ -52,7 +52,11 @@ INTENT_RULES = (
 )
 
 SENTENCE_BOUNDARY = re.compile(r"[.!?;\n]+")
-CONJUNCTION = re.compile(r"\band\b(?!\s+(?:monthly quota|plan details)\b)(?=\s+\w+\s+\w)")
+CONJUNCTION = re.compile(r"\band\b(?=\s+\w+\s+\w)")
+SHARED_SUBSCRIPTION_DETAILS = re.compile(
+    r"\b((?:subscription status|plan status|monthly quota)(?:,\s*(?:plan|tier))?)"
+    r"\s*,?\s+and\s+(?=(?:monthly quota|plan details)\b)"
+)
 CHANGE_VERBS = "cancel|pause|change|reset|reschedule"
 SHARED_ACTION_OBJECT = re.compile(rf"\b({CHANGE_VERBS})\s+and\s+(?=(?:{CHANGE_VERBS})\s+(?:my|the|this)\b)")
 HOW_TO_QUESTION = re.compile(r"^(?:how\b|(?:can|could|would) you (?:explain|tell me|show me) how\b)")
@@ -77,6 +81,7 @@ IMPERATIVE_REQUEST = re.compile(SENSITIVE_ACTION)
 def _clauses(text: str) -> Iterator[tuple[str, bool]]:
     for sentence in SENTENCE_BOUNDARY.split(text):
         sentence = SHARED_ACTION_OBJECT.sub(r"\1 or ", sentence.strip())
+        sentence = SHARED_SUBSCRIPTION_DETAILS.sub(r"\1, ", sentence)
         shares_how_to = bool(HOW_TO_QUESTION.match(sentence))
         for index, clause in enumerate(CONJUNCTION.split(sentence)):
             yield clause.strip(" ,\t"), shares_how_to and index > 0
