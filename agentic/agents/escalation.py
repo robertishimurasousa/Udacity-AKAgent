@@ -16,6 +16,7 @@ def prepare_handoff(
     retrieval: RetrievalResult | None,
     *,
     account_checked: bool,
+    subscription_checked: bool,
 ) -> Handoff:
     topics = [
         "unclassified request" if intent["intent_id"] == "unknown" else intent["intent_id"].replace("_", " ")
@@ -24,6 +25,8 @@ def prepare_handoff(
     actions = ["classified"]
     if account_checked:
         actions.append("account_checked")
+    if subscription_checked:
+        actions.append("subscription_checked")
     if retrieval is not None:
         actions.append(f"knowledge:{retrieval['status']}")
     return {

@@ -1,5 +1,4 @@
 from functools import partial
-from json import JSONDecodeError
 from pathlib import Path
 import sqlite3
 from typing import Literal, NotRequired, TypedDict
@@ -15,7 +14,7 @@ from agentic.agents.resolver import SupportResponse, compose_response
 from agentic.tools.cultpass import (
     AccountEvidence, VerifiedCustomer, lookup_account, lookup_subscription, validate_customer_scope,
 )
-from agentic.tools.memory import MemoryContext, MemoryScope, load_context, save_turn
+from agentic.tools.memory import MemoryContext, MemoryScope, load_context, save_turn, separate_memory_path
 from agentic.tools.sqlite import read_only_engine
 
 
@@ -126,10 +125,16 @@ def _resolve(state: SupportState) -> dict[str, Decision | SupportResponse]:
 
 def _handoff(state: SupportState) -> dict[str, Handoff]:
     reason = state["decision"]["reason"]
+    evidence = state.get("account_evidence")
+    subscription_checked = bool(evidence and "subscription" in evidence) or reason.startswith("subscription_")
+    account_checked = evidence is not None or subscription_checked or reason in {
+        "account_blocked", "account_not_found", "account_unavailable",
+    }
     return {
         "handoff": prepare_handoff(
             state["classification"], reason, state.get("retrieval"),
-            account_checked="account_evidence" in state or reason.startswith(("account_", "subscription_")),
+            account_checked=account_checked,
+            subscription_checked=subscription_checked,
         ),
     }
 
@@ -151,7 +156,7 @@ def _recall(state: TicketInput, *, database: Path) -> dict[str, MemoryContext | 
         return {"memory_status": "skipped"}
     try:
         return {"memory": load_context(database, scope)}
-    except (sqlite3.Error, JSONDecodeError):
+    except (sqlite3.Error, ValueError):
         return {"memory_status": "unavailable"}
 
 
@@ -188,7 +193,7 @@ def build_support_graph(
 
     completion = END
     if memory_database_path is not None:
-        database = Path(memory_database_path)
+        database = separate_memory_path(memory_database_path, database_path, cultpass_database_path)
         graph.add_node("recall", partial(_recall, database=database))
         graph.add_node("remember", partial(_remember, database=database))
         graph.add_edge(START, "recall")
