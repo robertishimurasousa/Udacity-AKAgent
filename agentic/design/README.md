@@ -1,80 +1,80 @@
-# Arquitetura do UDA-Hub
+# UDA-Hub Architecture
 
-Proposta para revisão no contexto da [ROB-37](https://linear.app/deltaedgeai/issue/ROB-37). A primeira entrega atende tickets da CultPass em uma execução local. Ela responde com evidências da base de conhecimento e do cadastro quando necessário, ou gera um encaminhamento para suporte humano. A [matriz de aceite](aceite.md) define como demonstrar o comportamento descrito aqui.
+Proposal for review under [ROB-37](https://linear.app/deltaedgeai/issue/ROB-37). The first delivery handles CultPass support tickets locally. It answers using evidence from the knowledge base and customer records when needed, or prepares a handoff to human support. The [acceptance matrix](aceite.md) defines how to demonstrate the behavior described here.
 
-## Escolha da arquitetura
+## Architecture choice
 
-O padrão proposto é **Supervisor**, com um `StateGraph` construído do zero em `agentic/workflow.py`. O supervisor aplica regras de roteamento sobre a classificação estruturada, os metadados e as evidências obtidas. Assim cada rota pode ser testada com entradas controladas e comparada com a rota observada em uma demonstração.
+The proposed pattern is a **Supervisor**, implemented as a `StateGraph` built from scratch in `agentic/workflow.py`. The supervisor applies routing rules to the structured classification, ticket metadata, and retrieved evidence. Each route can be tested with controlled inputs and compared with the route observed in a demo.
 
-Um supervisor com delegação livre pelo modelo permitiria explorar mais caminhos. Para o conjunto inicial da CultPass, as categorias e os dois desfechos cabem em transições explícitas. As regras de risco e de consulta de dados ficam no código, enquanto os agentes interpretam a mensagem, selecionam evidências e redigem a resposta ou o resumo.
+A supervisor that lets the model delegate freely could explore more paths. For the initial CultPass release, the categories and two outcomes fit explicit transitions. The code enforces risk and data access rules. The agents interpret the message, select evidence, and draft the response or handoff summary.
 
-A demonstração usa a interface local e exemplos de chat e e-mail no mesmo contrato de entrada. O encaminhamento persiste a decisão para revisão humana na própria aplicação. Conectores externos, operações financeiras, alterações na CultPass e MCP ficam fora do recorte proposto.
+The demo uses the local interface and examples from chat and email, with the same input contract for both channels. The application records the escalation decision for human review. External connectors, financial operations, changes to CultPass records, and MCP are outside the proposed scope.
 
-## Agentes e fluxo
+## Agents and workflow
 
-| Agente | Responsabilidade e fronteira |
+| Agent | Responsibilities and boundaries |
 | --- | --- |
-| Classificador | Interpreta o texto e o contexto da conversa. Retorna categoria, intenção, complexidade e termos de busca estruturados. Categorias iniciais incluem acesso, assinatura e cobrança, reservas, suporte técnico e desconhecido. |
-| Especialista em conhecimento | Busca artigos da conta pelo assunto, ordena os candidatos e entrega trechos, identificadores e pontuação de relevância. |
-| Especialista em conta | Consulta o status da conta e da assinatura quando a intenção envolve dados do cliente autenticado na simulação. Entrega fatos estruturados ao resolvedor. |
-| Resolvedor | Redige a resposta com base nos artigos recuperados. Quando a rota usa ferramenta, acrescenta os fatos retornados pela consulta autorizada e referencia o artigo que fundamenta a orientação. |
-| Agente de escalonamento | Produz uma mensagem ao cliente e um resumo separado para suporte humano com motivo, ações tentadas e informações pendentes. |
+| Classifier | Interprets the message and conversation context. Returns the category, intent, complexity, and structured search terms. Initial categories include account access, subscriptions and billing, reservations, technical support, and unknown. |
+| Knowledge specialist | Searches the organization's articles by topic, ranks the candidates, and returns excerpts, identifiers, and relevance scores. |
+| Account specialist | Looks up account and subscription status when the request involves data about the customer whose identity was verified in the simulation. Returns structured facts to the resolver. |
+| Resolver | Drafts the response from the retrieved articles. When the route calls a tool, it adds facts from the authorized lookup and references the article that supports the guidance. |
+| Escalation agent | Produces a customer message and a separate handoff summary for human support with the reason, actions attempted, and information still needed. |
 
-O supervisor encaminha urgência alta, pedidos de ação sensível e solicitações explícitas de atendimento humano diretamente ao escalonamento. Perguntas gerais vão ao especialista em conhecimento. Consultas específicas da conta passam primeiro pelo especialista em conta, depois pela busca de artigos. Erro de ferramenta indispensável, falta de evidência e falhas de classificação ou geração resultam em escalonamento com motivo explícito. Se o modelo estiver indisponível, o agente de escalonamento gera o resumo a partir de um template com categoria, motivo e consultas realizadas.
+The supervisor routes high-urgency tickets, sensitive action requests, and explicit requests for human support directly to escalation. General questions go to the knowledge specialist. Account-specific requests go to the account specialist first, followed by article retrieval. Failure of a required tool, missing evidence, and classification or generation failures trigger escalation with an explicit reason. If the model is unavailable, the escalation agent uses a template with the category, reason, and lookups performed.
 
 ```mermaid
 flowchart TD
-    Input["Ticket e metadados"] --> Context["Validar identidade e carregar histórico"]
-    Context -->|"Titularidade válida"| Classify["Classificador"]
-    Context -->|"Identidade ou titularidade inválida"| Rejected["Rejeitar entrada"]
+    Input["Ticket and metadata"] --> Context["Verify identity and load history"]
+    Context -->|"Ownership verified"| Classify["Classifier"]
+    Context -->|"Invalid identity or ownership"| Rejected["Reject input"]
     Classify --> Supervisor{"Supervisor"}
-    Supervisor -->|"Dado do cliente"| Account["Especialista em conta"]
-    Supervisor -->|"Orientação geral"| Knowledge["Especialista em conhecimento"]
-    Supervisor -->|"Urgência, risco ou erro"| Escalate["Agente de escalonamento"]
-    Account -->|"Consulta válida"| Knowledge
-    Account -->|"Conta bloqueada ou consulta indisponível"| Escalate
-    Knowledge -->|"Evidência suficiente"| Resolve["Resolvedor"]
-    Knowledge -->|"Evidência insuficiente ou busca indisponível"| Escalate
-    Resolve -->|"Resposta com referências válidas"| Save["Persistir mensagens e desfecho"]
-    Resolve -->|"Falha ou evidência inválida"| Escalate
+    Supervisor -->|"Customer data"| Account["Account specialist"]
+    Supervisor -->|"General guidance"| Knowledge["Knowledge specialist"]
+    Supervisor -->|"Urgency, risk, or error"| Escalate["Escalation agent"]
+    Account -->|"Successful lookup"| Knowledge
+    Account -->|"Blocked account or unavailable lookup"| Escalate
+    Knowledge -->|"Sufficient evidence"| Resolve["Resolver"]
+    Knowledge -->|"Insufficient evidence or unavailable search"| Escalate
+    Resolve -->|"Response with valid references"| Save["Persist messages and outcome"]
+    Resolve -->|"Failure or invalid evidence"| Escalate
     Escalate --> Save
-    Save --> Output["Devolver resposta ou encaminhamento"]
+    Save --> Output["Return response or handoff"]
 ```
 
-## Contrato e estado
+## Contract and state
 
-A entrada normalizada contém `account_id`, `ticket_id`, `turn_id`, texto, canal, urgência, data de recebimento e `external_user_id`. O `account_id` representa a organização atendida. Na demonstração local, o operador seleciona um perfil sintético pré-cadastrado. A interface mapeia o perfil à identidade da conta e do cliente fora da mensagem e injeta esse contexto no fluxo. Um ticket novo é vinculado a essa identidade. Ao retomar um ticket, o serviço confere o vínculo no UDA-Hub antes de carregar estado ou usar ferramentas. A interface rejeita perfis desconhecidos e tickets de outro titular. Um identificador escrito na mensagem é tratado como texto. Essa seleção simula a identidade fornecida por uma integração de atendimento.
+The normalized input contains `account_id`, `ticket_id`, `turn_id`, the message text, channel, urgency, receipt date, and `external_user_id`. The `account_id` identifies the organization supported by UDA-Hub. In the local demo, the operator selects a preregistered synthetic profile. The interface resolves the organization and customer identity independently of the message and passes that context to the workflow. New tickets are linked to that identity. When a ticket is resumed, the service checks ownership in UDA-Hub before loading state or calling tools. The interface rejects unknown profiles and tickets owned by someone else. Identifiers entered in a message are treated as text. Selecting a profile simulates the identity provided by a support integration.
 
-O estado do grafo mantém a classificação, a rota, evidências, resultados de ferramentas e desfecho do turno atual, além das mensagens da sessão. Campos transitórios são reiniciados a cada turno. A saída traz `resolved` ou `escalated`, a resposta ao cliente, referências dos artigos utilizados, pontuação de relevância quando calculada e, para escalonamentos, o motivo e um resumo para suporte. Um erro de entrada ou de persistência é reportado à interface como erro operacional. Uma interrupção sem confirmação da gravação não é apresentada como ticket resolvido.
+Graph state contains the session messages and the current turn's classification, route, evidence, tool results, and outcome. Transient fields reset on each turn. The output includes a `resolved` or `escalated` status, the customer response, references to the articles used, and the relevance score when available. Escalated results also include the reason and a summary for support. Input or persistence failures are reported to the interface as operational errors. The interface shows a ticket as resolved only after persistence has been confirmed.
 
-## Recuperação de conhecimento e confiança
+## Knowledge retrieval and confidence
 
-O especialista consulta a tabela `Knowledge` por `account_id`. Para este corpus pequeno, a proposta é ordenar em memória por cobertura de termos normalizados em título, tags e conteúdo. O classificador fornece os termos informativos da intenção e pode expandir sinônimos previstos para as categorias. A pontuação de relevância é a fração entre os termos informativos distintos encontrados no artigo e o total de termos consultados. Empates privilegiam correspondências em título e tags e usam o identificador do artigo como último critério. Até três candidatos seguem com título, conteúdo, ID e pontuação.
+The specialist queries the `Knowledge` table by `account_id`. For this small corpus, the proposal is to rank articles in memory by how many normalized search terms match their titles, tags, and content. The classifier supplies informative terms for the intent and can expand them using predefined synonyms for each category. The relevance score is the number of distinct informative query terms found in the article divided by the total number of query terms. Ties favor title and tag matches, with the article ID as the final tie-breaker. Up to three candidates are passed onward with their title, content, ID, and score.
 
-O limiar inicial proposto é **0,60**, sujeito à calibração com os exemplos da rubrica. Uma consulta vazia ou sem candidatos tem pontuação zero. Abaixo do limiar, a rota é escalonamento. Para cada intenção identificada, o resolvedor aponta um artigo e um trecho literal que sustenta a orientação. O código confere que o artigo foi recuperado acima ou no limiar, que o trecho existe nesse artigo e que todas as intenções estão cobertas. Se só parte do pedido tiver evidência, o agente gera um encaminhamento com o ponto pendente. Os casos de aceite verificam também se os trechos apontados sustentam a orientação esperada.
+The proposed initial threshold is **0.60**, subject to calibration against the rubric examples. An empty query or a search with no candidates scores zero. Scores below the threshold lead to escalation. For each identified intent, the resolver selects an article and quotes an excerpt that supports the guidance. The code checks that the retrieved article met the threshold, that the excerpt appears in that article, and that every intent has evidence. If the evidence covers only part of the request, the agent prepares a handoff that identifies what remains unresolved. The acceptance scenarios also check whether the cited excerpts support the expected guidance.
 
-O resolvedor recebe apenas os artigos recuperados e os fatos autorizados necessários ao caso. A resposta usa os trechos validados e os campos estruturados das ferramentas. Conteúdo de tickets, histórico e artigos é tratado como dado. A preferência inicial é o formato da resposta, conciso ou em passos, aplicado na renderização. Regras de atendimento vêm da base de conhecimento vigente.
+The resolver receives only the retrieved articles and the authorized facts necessary for the case. The response uses validated excerpts and structured tool fields. Ticket text, history, and article content are treated as data. The initial customer preference is response format. The application applies the customer's choice of a concise or step-by-step response when rendering the output. Support policies come from the current knowledge base.
 
-## Ferramentas de suporte e dados
+## Support tools and data
 
-| Ferramenta | Fonte | Resultado esperado |
+| Tool | Source | Expected result |
 | --- | --- | --- |
-| `lookup_account` | `User` no SQLite CultPass | Identificador do cliente e situação da conta, incluindo bloqueio. |
-| `lookup_subscription` | `Subscription` do mesmo cliente no SQLite CultPass | Situação, plano e franquia mensal, quando houver assinatura. |
+| `lookup_account` | `User` in CultPass SQLite | Customer identifier and account status, including whether the account is blocked. |
+| `lookup_subscription` | The customer's `Subscription` in CultPass SQLite | Status, plan, and monthly quota when the customer has a subscription. |
 
-As ferramentas recebem a identidade verificada pelo serviço, validam os parâmetros e retornam `ok`, `not_found`, `invalid_input`, `forbidden` ou `unavailable`, com campos conhecidos para cada resultado. Um cliente cadastrado sem assinatura tem resultado `ok` com `has_subscription=false`. O resolvedor pode informar esse fato quando houver artigo aplicável. `not_found` indica identidade sem cadastro CultPass e leva a escalonamento quando a consulta é indispensável. Acesso a dados e consultas SQLAlchemy ficam em `agentic/tools/`. Conta bloqueada segue para escalonamento. A interface fornece as duas localizações dos bancos ao construir o grafo, com padrões relativos à raiz do pacote, resolvidos a partir do arquivo da aplicação.
+The tools receive the identity verified by the service, validate their inputs, and return `ok`, `not_found`, `invalid_input`, `forbidden`, or `unavailable`, with defined fields for each result. A registered customer without a subscription receives `ok` with `has_subscription=false`. The resolver can report that fact when an applicable article is available. The `not_found` status means the identity has no CultPass record and leads to escalation when the lookup is required. Data access and SQLAlchemy queries live in `agentic/tools/`. A blocked account leads to escalation. The interface supplies both database paths when building the graph, with defaults relative to the package root and resolved from the application file.
 
-Os notebooks `01_external_db_setup.ipynb` e `02_core_db_setup.ipynb` criam SQLite CultPass e UDA-Hub em diretórios distintos. A base de conhecimento terá os quatro artigos originais e pelo menos dez adicionais, incluindo suporte técnico, faturamento, gerenciamento de conta e reservas. Em testes, dados sintéticos e determinísticos substituem os valores aleatórios do notebook CultPass.
+The `01_external_db_setup.ipynb` and `02_core_db_setup.ipynb` notebooks create the CultPass and UDA-Hub SQLite databases in separate directories. The knowledge base will contain the four original articles and at least ten additional articles covering topics such as technical support, billing, account management, and reservations. Tests use deterministic synthetic data in place of the randomly generated values from the CultPass notebook.
 
-## Sessão, persistência e rastreabilidade
+## Sessions, persistence, and traceability
 
-- **Estado do turno.** LangGraph transporta classificação, mensagens, evidências e ações entre os nós. O checkpoint usa um `thread_id` derivado internamente da conta e do ticket. Ele permite inspecionar mensagens e ferramentas usadas no turno por meio da sessão de teste. A proposta é usar um checkpointer SQLite para persistir a sessão em um ambiente local com escrita serial.
-- **Histórico e memória de longo prazo.** `Ticket`, `TicketMetadata` e `TicketMessage` guardam o histórico e os resultados no SQLite UDA-Hub. Uma tabela de preferências proposta, com chave de conta e cliente, guarda escolhas explícitas de formato da resposta. Um ticket novo pode carregar preferências e resumos de casos resolvidos do mesmo cliente, inclusive após reinício. O histórico de outro cliente fica fora dessa consulta.
-- **Persistência de turnos.** Mensagens e desfecho são registrados antes de apresentar a saída. A chave do turno por ticket permite recuperar uma resposta já gravada em caso de repetição. O checkpoint carrega estado de sessão, e o registro do turno concluído vem do banco UDA-Hub. Um reinício que descarte checkpoints pode recuperar as mensagens persistidas.
-- **Logs.** Eventos JSON por nó incluem IDs internos da execução, ticket e turno, categoria, rota, ferramenta, resultado, pontuação e motivo de escalonamento quando aplicável. Busca por `ticket_id` ou `turn_id` permite reproduzir a trilha completa. A configuração do provedor fica no ambiente local e o histórico no banco UDA-Hub. Logs de diagnóstico usam apenas identificadores e resultados estruturados.
+- **Turn state.** LangGraph passes classifications, messages, evidence, and actions between nodes. The checkpoint uses a `thread_id` derived internally from the organization and ticket. It lets reviewers inspect the turn's messages and tool calls through the test session. The proposal uses a SQLite checkpointer to persist sessions in a local environment with serial writes.
+- **History and long-term memory.** `Ticket`, `TicketMetadata`, and `TicketMessage` store history and outcomes in the UDA-Hub SQLite database. A proposed preferences table keyed by organization and customer stores explicit response format choices. A new ticket can load preferences and summaries of resolved cases from the same customer, including after a restart. The query is scoped to that customer's history.
+- **Turn persistence.** Messages and outcomes are recorded before the application returns the output. A turn key scoped to the ticket lets the service retrieve an already saved response when a turn is retried. The checkpoint holds session state, and the UDA-Hub database records completed turns. After a restart without checkpoints, the application can recover persisted messages.
+- **Logs.** JSON events for each node include internal run, ticket, and turn IDs, along with the category, route, tool, outcome, score, and escalation reason where applicable. Searching by `ticket_id` or `turn_id` reconstructs the full trace. Provider configuration stays in the local environment and history stays in the UDA-Hub database. Diagnostic logs contain identifiers and structured results.
 
-## Entrega e validação
+## Delivery and validation
 
-O trabalho pode ocorrer na raiz do repositório. A submissão será montada em `solution/` com código, notebooks de setup, insumos, dependências versionadas, testes, estes documentos e instruções de execução. O ambiente Python e os bancos são criados localmente. A aplicação terá um ponto de entrada documentado dentro do pacote.
+Development can take place at the repository root. The submission will be assembled in `solution/` with code, setup notebooks, seed data, versioned dependencies, tests, these documents, and run instructions. The Python environment and databases are created locally. The application will have a documented entry point inside the package.
 
-Os testes usarão respostas controladas do modelo e bancos temporários para verificar caminhos e casos de falha sem credenciais. A demonstração acadêmica exercitará também o provedor configurado com tickets fictícios, seguindo os casos da [matriz de aceite](aceite.md). A dependência do checkpoint SQLite e as versões finais serão fixadas com base na validação da solução implementada.
+Tests will use controlled model responses and temporary databases to verify routes and failure cases without credentials. The academic demo will also exercise the configured provider with fictional tickets from the [acceptance matrix](aceite.md). The SQLite checkpoint dependency and final versions will be pinned after validating the implementation.
