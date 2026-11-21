@@ -140,6 +140,7 @@ class AccountResolutionTests(unittest.TestCase):
                 self.assertEqual(result["decision"], {"next_step": "escalate", "reason": reason})
                 self.assertNotIn("response", result)
                 self.assertNotIn("account_evidence", result)
+                self.assertEqual(result["handoff"]["actions"], ["classified"])
 
     def test_blocked_or_unknown_customer_is_escalated(self):
         for customer, reason in [("blocked", "account_blocked"), ("unknown", "account_not_found")]:
