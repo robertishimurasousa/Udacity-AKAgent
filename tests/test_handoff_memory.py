@@ -133,3 +133,135 @@ class HandoffMemoryTests(unittest.TestCase):
             self.assertEqual(result["decision"]["next_step"], "resolve")
             self.assertEqual(result["memory_status"], "unavailable")
             self.assertNotIn("memory", result)
+
+    def test_history_contains_customer_message_response_and_handoff(self):
+        question = "I forgot my password."
+        answer = self.invoke_memory(question)
+        uncovered = "How do I assemble a telescope?"
+        escalated = self.invoke_memory(uncovered, turn="turn-2")
+        later = self.invoke_memory("How do I reserve a spot for an event?", turn="turn-3")
+        other = self.invoke_memory("I forgot my password.", customer="alice")
+
+        self.assertIn("history", later["memory"])
+        first, second = later["memory"]["history"]
+        self.assertEqual(first["customer_message"], question)
+        self.assertEqual(first["response"], answer["response"])
+        self.assertEqual(second["customer_message"], uncovered)
+        self.assertEqual(second["handoff"], escalated["handoff"])
+        self.assertEqual(other["memory"]["history"], [])
+
+    def test_replay_returns_the_original_outcome_without_reclassifying(self):
+        first = self.invoke_memory("I forgot my password.")
+        repeated = self.invoke_memory("How do I assemble a telescope?")
+
+        self.assertEqual(repeated["memory_status"], "replayed")
+        self.assertEqual(repeated["decision"], first["decision"])
+        self.assertEqual(repeated["response"], first["response"])
+        self.assertNotIn("handoff", repeated)
+        self.assertEqual(repeated["memory"]["history"][0]["customer_message"], "I forgot my password.")
+
+    def test_explicit_step_by_step_preference_applies_across_tickets_and_is_isolated(self):
+        first = self.invoke_memory("Please answer step by step. I forgot my password.")
+        new_ticket = self.invoke_memory("How do I reserve a spot for an event?", ticket="ticket-2")
+        other = self.invoke_memory("How do I reserve a spot for an event?", ticket="ticket-2", customer="alice")
+
+        self.assertEqual(first["decision"]["next_step"], "resolve")
+        self.assertTrue(first["response"]["text"].startswith("1. "))
+        self.assertEqual(new_ticket["memory"]["response_style"], "step_by_step")
+        self.assertTrue(new_ticket["response"]["text"].startswith("1. "))
+        self.assertIsNone(other["memory"]["response_style"])
+        self.assertFalse(other["response"]["text"].startswith("1. "))
+
+    def test_standalone_preference_can_change_without_losing_the_ticket_topic(self):
+        baseline = self.invoke_memory("I forgot my password.", customer="alice")
+        self.invoke_memory("Please answer step by step. I forgot my password.")
+        updated = self.invoke_memory("Please keep your answers concise.", turn="turn-2")
+        follow_up = self.invoke_memory("What should I do next?", turn="turn-3")
+
+        self.assertEqual(updated["decision"]["reason"], "preference_saved")
+        self.assertEqual(updated["memory_status"], "saved")
+        self.assertEqual(follow_up["memory"]["response_style"], "concise")
+        self.assertEqual(follow_up["decision"]["next_step"], "resolve")
+        self.assertIn("Forgot Password", follow_up["response"]["text"])
+        self.assertIn("check spam or try again in a few minutes", follow_up["response"]["text"])
+        self.assertFalse(follow_up["response"]["text"].startswith("1. "))
+        self.assertLess(len(follow_up["response"]["text"]), len(baseline["response"]["text"]))
+        self.assertEqual(follow_up["response"]["citations"], baseline["response"]["citations"])
+
+    def test_preference_without_a_verified_profile_is_not_recorded(self):
+        graph = build_support_graph(self.knowledge_db, memory_database_path=self.memory_db)
+        result = graph.invoke({
+            "account_id": "cultpass", "ticket_id": "ticket-1", "turn_id": "turn-1",
+            "text": "Please keep your answers concise.",
+        })
+
+        self.assertEqual(result["decision"]["reason"], "preference_storage_required")
+        self.assertFalse(self.memory_db.exists())
+
+    def test_history_redacts_credentials_and_email_in_customer_message(self):
+        self.invoke_memory(
+            "I forgot my password. Email fake@example.test. OPENAI_API_KEY=sk-test-not-a-real-token. "
+            "Password = \"synthetic phrase redaction-marker\"; password: synthetic-colon-marker; "
+            "token='synthetic-token-prefix,redaction-tail'."
+        )
+        later = self.invoke_memory("How do I reserve a spot for an event?", turn="turn-2")
+
+        self.assertIn("history", later["memory"])
+        message = later["memory"]["history"][0]["customer_message"]
+        self.assertIn("I forgot my password", message)
+        self.assertIn("[redacted]", message)
+        self.assertNotIn("fake@example.test", message)
+        self.assertNotIn("sk-test-not-a-real-token", message)
+        self.assertNotIn("redaction-marker", message)
+        self.assertNotIn("synthetic-colon-marker", message)
+        self.assertNotIn("redaction-tail", message)
+
+    def test_incomplete_stored_outcome_is_not_replayed_as_success(self):
+        self.invoke_memory("I forgot my password.")
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            db.execute("UPDATE support_turns SET outcome = ?", (json.dumps({
+                "classification": {},
+                "decision": {"next_step": "resolve", "reason": "evidence_ready"},
+                "response": None,
+            }),))
+
+        result = self.invoke_memory("I forgot my password.")
+
+        self.assertEqual(result["memory_status"], "unavailable")
+        self.assertIn("Forgot Password", result["response"]["text"])
+
+    def test_legacy_database_preserves_metadata_and_accepts_new_messages(self):
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            db.execute("""
+                CREATE TABLE support_turns (
+                    sequence INTEGER PRIMARY KEY,
+                    account_id TEXT NOT NULL,
+                    customer_id TEXT NOT NULL,
+                    ticket_id TEXT NOT NULL,
+                    turn_id TEXT NOT NULL,
+                    next_step TEXT NOT NULL,
+                    intents TEXT NOT NULL,
+                    UNIQUE(account_id, customer_id, ticket_id, turn_id)
+                )
+            """)
+            db.execute("INSERT INTO support_turns VALUES (1, ?, ?, ?, ?, ?, ?)", (
+                "cultpass", "sam", "ticket-1", "old", "resolve",
+                json.dumps([{
+                    "intent_id": "login", "category": "access",
+                    "terms": ["password", "email"], "customer_data_required": False,
+                }]),
+            ))
+
+        legacy_retry = self.invoke_memory("Please answer step by step.", turn="old")
+        later = self.invoke_memory("What should I do next?", turn="new")
+        after = self.invoke_memory("How do I reserve a spot for an event?", turn="later")
+
+        self.assertEqual(legacy_retry["memory_status"], "legacy")
+        self.assertEqual(legacy_retry["decision"]["reason"], "preference_turn_already_recorded")
+        self.assertIsNone(later["memory"]["response_style"])
+        self.assertEqual(later["decision"]["next_step"], "resolve")
+        self.assertIn("history", after["memory"])
+        old, new = after["memory"]["history"]
+        self.assertEqual(old["turn_id"], "old")
+        self.assertNotIn("customer_message", old)
+        self.assertEqual(new["customer_message"], "What should I do next?")
