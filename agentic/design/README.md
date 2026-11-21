@@ -26,6 +26,7 @@ flowchart TD
     Input["Ticket, metadata and trusted profile context"] --> Context["Recall history when scoped"]
     Context -->|"New turn"| Classify["Classifier"]
     Context -->|"Saved turn"| Output["Return outcome"]
+    Context -->|"History unavailable"| Error["Return operational error"]
     Classify --> Supervisor{"Supervisor"}
     Supervisor -->|"Customer data"| Account["Account specialist"]
     Supervisor -->|"General guidance"| Knowledge["Knowledge specialist"]
@@ -48,7 +49,7 @@ flowchart TD
 
 The normalized input contains `account_id`, message text, optional channel and urgency, and optional ticket, turn and verified profile fields. The caller supplies the verified profile separately from the message. The CLI accepts a synthetic fixture ID to simulate a trusted connector. Full interface authentication and ticket ownership checks remain pending.
 
-Graph state contains remembered turns and the current turn's classification, route, evidence, tool results, and outcome. The output reports the decision and its reason, plus a cited response or handoff when applicable. Relevance scores remain available in the retrieval result. If SQLite rejects a turn write, the workflow returns `operational_error` and clears the draft response and handoff. A repeated turn ID can be submitted after storage is restored.
+Graph state contains remembered turns and the current turn's classification, route, evidence, tool results, and outcome. The output reports the decision and its reason, plus a cited response or handoff when applicable. Relevance scores remain available in the retrieval result. With scoped history enabled, an unavailable store or a rejected turn write produces `operational_error`. A repeated turn ID can be submitted after storage is restored.
 
 ## Knowledge retrieval and confidence
 

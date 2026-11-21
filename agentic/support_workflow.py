@@ -45,7 +45,7 @@ class TicketOutput(TypedDict):
     handoff: NotRequired[Handoff | None]
     memory: NotRequired[MemoryContext]
     memory_status: NotRequired[Literal["saved", "skipped", "unavailable", "replayed", "legacy"]]
-    provider_verdict: NotRequired[ReviewVerdict]
+    provider_verdict: NotRequired[ReviewVerdict | None]
     trace_status: NotRequired[TraceStatus]
 
 
@@ -80,6 +80,8 @@ def _classify(state: SupportState) -> dict[str, object]:
 
 
 def _supervise(state: SupportState) -> dict[str, Decision]:
+    if state.get("memory_status") == "unavailable":
+        return {"decision": {"next_step": "operational_error", "reason": "history_unavailable"}}
     classification = state["classification"]
     if state.get("urgency", "normal").casefold() == "high":
         return {"decision": {"next_step": "escalate", "reason": "high_urgency"}}
@@ -208,8 +210,6 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
     scope = _memory_scope(state)
     if scope is None:
         return {"memory_status": "skipped"}
-    if state.get("memory_status") == "unavailable":
-        return {"memory_status": "unavailable"}
     outcome: StoredOutcome = {
         "decision": dict(state["decision"]),
         "classification": state["classification"],
@@ -218,6 +218,8 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         outcome["response"] = response
     if (handoff := state.get("handoff")) is not None:
         outcome["handoff"] = handoff
+    if (verdict := state.get("provider_verdict")) is not None:
+        outcome["provider_verdict"] = verdict
     preference_request = state["decision"]["reason"] == "preference_saved"
     try:
         status, stored = save_turn(
@@ -241,7 +243,7 @@ def _remember(state: SupportState, *, database: Path) -> dict[str, object]:
         return {"memory_status": status}
     update: dict[str, object] = {**stored, "memory_status": status}
     if status == "replayed":
-        for key in ("response", "handoff", "retrieval", "account_evidence"):
+        for key in ("response", "handoff", "retrieval", "account_evidence", "provider_verdict"):
             if key in state and key not in stored:
                 update[key] = None
     return update
@@ -385,6 +387,7 @@ def build_support_graph(
         {
             "retrieve_knowledge": "retrieve_knowledge", "resolve": "resolve",
             "escalate": "prepare_handoff", "lookup_account": account_route,
+            "operational_error": finish,
         },
     )
     graph.add_edge("retrieve_knowledge", "review_evidence")
