@@ -1,5 +1,6 @@
 from contextlib import closing
 import json
+import os
 from pathlib import Path
 import sqlite3
 from tempfile import TemporaryDirectory
@@ -102,3 +103,33 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(result["decision"]["next_step"], "resolve")
         self.assertEqual(result["memory_status"], "unavailable")
         self.assertFalse(inaccessible.exists())
+
+    def test_memory_cannot_alias_either_read_only_database(self):
+        link = self.memory_db.with_name("link.db")
+        link.symlink_to(self.knowledge_db)
+        hard_link = self.memory_db.with_name("hard-link.db")
+        os.link(self.knowledge_db, hard_link)
+        external = self.memory_db.with_name("cultpass.db")
+        external.touch()
+        before = self.knowledge_db.read_bytes()
+        for destination in (self.knowledge_db, link, hard_link, external):
+            with self.subTest(destination=destination):
+                with self.assertRaisesRegex(ValueError, "separate"):
+                    build_support_graph(
+                        self.knowledge_db, cultpass_database_path=external, memory_database_path=destination,
+                    )
+        self.assertEqual(self.knowledge_db.read_bytes(), before)
+        self.assertEqual(external.read_bytes(), b"")
+
+    def test_corrupt_intents_are_unavailable_without_interrupting_the_ticket(self):
+        self.invoke_memory("I forgot my password.")
+        with closing(sqlite3.connect(self.memory_db)) as db, db:
+            db.execute("UPDATE support_turns SET intents = 'null'")
+
+        same_ticket = self.invoke_memory("I forgot my password.", turn="turn-2")
+        new_ticket = self.invoke_memory("I forgot my password.", ticket="ticket-2")
+
+        for result in (same_ticket, new_ticket):
+            self.assertEqual(result["decision"]["next_step"], "resolve")
+            self.assertEqual(result["memory_status"], "unavailable")
+            self.assertNotIn("memory", result)
