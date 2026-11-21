@@ -101,12 +101,16 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(turns[0][0], "turn-1")
         self.assertNotIn("example-secret-marker", turns[0][1])
 
-    def test_memory_failure_is_visible_and_keeps_general_guidance_available(self):
+    def test_unavailable_database_at_recall_blocks_completion(self):
         inaccessible = self.memory_db.parent / "missing-directory" / "memory.db"
         result = self.invoke_memory("I forgot my password.", path=inaccessible)
 
-        self.assertEqual(result["decision"]["next_step"], "resolve")
+        self.assertEqual(result["decision"], {
+            "next_step": "operational_error", "reason": "history_unavailable",
+        })
         self.assertEqual(result["memory_status"], "unavailable")
+        self.assertIsNone(result.get("response"))
+        self.assertIsNone(result.get("handoff"))
         self.assertFalse(inaccessible.exists())
 
     def test_aborted_history_write_changes_the_outcome_and_can_be_retried(self):
@@ -184,13 +188,19 @@ class HandoffMemoryTests(unittest.TestCase):
                 "text": json.dumps({"verdict": "approved", "citations": ["invented-article"]}),
             }]}],
         }
-        for code, body in ((503, failure), (200, unexpected)):
-            with self.subTest(http_status=code):
+        responses = {
+            "outage": httpx.Response(503, json=failure),
+            "extra field": httpx.Response(200, json=unexpected),
+            "invalid JSON": httpx.Response(200, content=b"{", headers={"content-type": "application/json"}),
+            "HTML gateway": httpx.Response(200, text="<html>Gateway failure</html>"),
+        }
+        for case, response in responses.items():
+            with self.subTest(case=case):
                 def handle(request):
                     payload = json.loads(request.content)
                     self.assertFalse(payload["store"])
                     self.assertNotIn("private-input", payload["input"])
-                    return httpx.Response(code, json=body)
+                    return response
 
                 with OpenAI(
                     api_key="synthetic-test-key", max_retries=0,
@@ -203,6 +213,31 @@ class HandoffMemoryTests(unittest.TestCase):
                 self.assertEqual(result["decision"]["reason"], "provider_unavailable")
                 self.assertIn("review this ticket", result["handoff"]["summary"])
                 self.assertIsNone(result.get("response"))
+
+    def test_replaying_a_saved_turn_keeps_its_original_provider_verdict(self):
+        ticket = {
+            "account_id": "cultpass", "text": "I forgot my password.",
+            "ticket_id": "ticket-1", "turn_id": "turn-1",
+            "verified_customer": {"account_id": "cultpass", "external_user_id": "sam"},
+        }
+        winner = build_support_graph(
+            self.knowledge_db, memory_database_path=self.memory_db,
+            evidence_reviewer=lambda *_: "approved",
+        )
+
+        def reject_after_winner_saves(*_):
+            self.assertEqual(winner.invoke(ticket)["memory_status"], "saved")
+            return "rejected"
+
+        contender = build_support_graph(
+            self.knowledge_db, memory_database_path=self.memory_db,
+            evidence_reviewer=reject_after_winner_saves,
+        )
+        for replay in (contender.invoke(ticket), winner.invoke(ticket)):
+            self.assertEqual(replay["memory_status"], "replayed")
+            self.assertEqual(replay["decision"]["next_step"], "resolve")
+            self.assertEqual(replay["provider_verdict"], "approved")
+            self.assertIsNone(replay.get("handoff"))
 
     def test_trace_filters_steps_by_ticket_and_turn_and_omits_messages(self):
         path = self.memory_db.with_suffix(".jsonl")
@@ -254,7 +289,7 @@ class HandoffMemoryTests(unittest.TestCase):
         self.assertEqual(self.knowledge_db.read_bytes(), before)
         self.assertEqual(external.read_bytes(), b"")
 
-    def test_corrupt_intents_are_unavailable_without_interrupting_the_ticket(self):
+    def test_corrupt_intents_block_completion_when_history_is_required(self):
         self.invoke_memory("I forgot my password.")
         with closing(sqlite3.connect(self.memory_db)) as db, db:
             db.execute("UPDATE support_turns SET intents = 'null'")
@@ -263,7 +298,7 @@ class HandoffMemoryTests(unittest.TestCase):
         new_ticket = self.invoke_memory("I forgot my password.", ticket="ticket-2")
 
         for result in (same_ticket, new_ticket):
-            self.assertEqual(result["decision"]["next_step"], "resolve")
+            self.assertEqual(result["decision"]["next_step"], "operational_error")
             self.assertEqual(result["memory_status"], "unavailable")
             self.assertNotIn("memory", result)
 
@@ -361,7 +396,8 @@ class HandoffMemoryTests(unittest.TestCase):
         result = self.invoke_memory("I forgot my password.")
 
         self.assertEqual(result["memory_status"], "unavailable")
-        self.assertIn("Forgot Password", result["response"]["text"])
+        self.assertEqual(result["decision"]["next_step"], "operational_error")
+        self.assertIsNone(result.get("response"))
 
     def test_legacy_database_preserves_metadata_and_accepts_new_messages(self):
         with closing(sqlite3.connect(self.memory_db)) as db, db:

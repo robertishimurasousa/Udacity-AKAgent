@@ -44,9 +44,14 @@ def build_openai_reviewer(client: OpenAI, *, model: str = DEFAULT_MODEL) -> Evid
                 max_output_tokens=64,
                 store=False,
             )
-        except (APIError, ValidationError):
+            parsed = result.output_parsed
+        except (APIError, ValidationError, json.JSONDecodeError, AttributeError, TypeError):
+            # The SDK can encounter an invalid response body before validating the verdict.
             return "unavailable"
-        parsed = result.output_parsed
-        return parsed.verdict if result.status == "completed" and parsed else "unavailable"
+        return (
+            parsed.verdict
+            if result.status == "completed" and isinstance(parsed, GroundingReview)
+            else "unavailable"
+        )
 
     return review
