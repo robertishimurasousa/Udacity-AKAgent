@@ -51,7 +51,7 @@ SECRET = re.compile(
 EMAIL = re.compile(r"(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b")
 
 
-def _redact(text: str) -> str:
+def redact_support_text(text: str) -> str:
     return EMAIL.sub("[redacted]", SECRET.sub("[redacted]", text))
 
 
@@ -62,9 +62,9 @@ def _redact_outcome(outcome: StoredOutcome) -> StoredOutcome:
     return {
         **outcome,
         "response": {
-            "text": _redact(response["text"]),
+            "text": redact_support_text(response["text"]),
             "citations": [
-                {**citation, "excerpt": _redact(citation["excerpt"])}
+                {**citation, "excerpt": redact_support_text(citation["excerpt"])}
                 for citation in response["citations"]
             ],
         },
@@ -151,6 +151,23 @@ def _validate_intents(decoded: object) -> list[ClassifiedIntent]:
 
 def _decode_intents(value: str) -> list[ClassifiedIntent]:
     return _validate_intents(json.loads(value))
+
+
+def legacy_ticket_owners(database: Path, account_id: str, ticket_id: str) -> list[str]:
+    """Find owner keys for turns recorded before the CLI registered tickets."""
+    if not database.exists():
+        return []
+    uri = f"{database.resolve().as_uri()}?mode=ro"
+    with closing(sqlite3.connect(uri, uri=True)) as db:
+        if not db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'support_turns'",
+        ).fetchone():
+            return []
+        rows = db.execute("""
+            SELECT DISTINCT customer_id FROM support_turns
+            WHERE account_id = ? AND ticket_id = ? LIMIT 2
+        """, (account_id, ticket_id))
+        return [row[0] for row in rows]
 
 
 @contextmanager
@@ -244,7 +261,7 @@ def save_turn(
     customer_message: str,
     outcome: StoredOutcome,
     requested_style: ResponseStyle | None,
-) -> tuple[Literal["saved", "replayed", "legacy"], StoredOutcome | None]:
+) -> tuple[Literal["saved", "replayed", "legacy"], StoredOutcome | None, str | None]:
     stored = _redact_outcome(outcome)
     decision = stored["decision"]
     next_step = "preference" if decision["reason"] == "preference_saved" else decision["next_step"]
@@ -257,19 +274,19 @@ def save_turn(
             ON CONFLICT (account_id, customer_id, ticket_id, turn_id) DO NOTHING
         """, (
             *scope, turn_id, next_step, json.dumps(stored["classification"]["intents"]),
-            _redact(customer_message), json.dumps(stored),
+            redact_support_text(customer_message), json.dumps(stored),
         ))
         if insert.rowcount == 0:
             existing = connection.execute("""
-                SELECT outcome FROM support_turns
+                SELECT outcome, customer_message FROM support_turns
                 WHERE account_id = ? AND customer_id = ? AND ticket_id = ? AND turn_id = ?
             """, (*scope, turn_id)).fetchone()
             replay = _decode_outcome(existing[0])
-            return ("replayed", replay) if replay else ("legacy", None)
+            return ("replayed", replay, existing[1]) if replay else ("legacy", None, None)
         if requested_style is not None:
             connection.execute("""
                 INSERT INTO support_preferences (account_id, customer_id, response_style)
                 VALUES (?, ?, ?)
                 ON CONFLICT (account_id, customer_id) DO UPDATE SET response_style = excluded.response_style
             """, (scope.account_id, scope.customer_id, requested_style))
-    return "saved", stored
+    return "saved", stored, None
