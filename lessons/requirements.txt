@@ -1,0 +1,18 @@
+# Python 3.11.18. Install in a separate lesson environment with
+# python -m pip install -r lessons/requirements.txt
+# Select that interpreter as the notebook kernel in PyCharm.
+# Model examples use VOCAREUM_API_KEY. Lesson 2 search also uses TAVILY_API_KEY.
+# The diagram cells render through the Mermaid API.
+ipykernel==7.4.0
+ipython==9.18.1
+jupyter-client==8.10.0
+langchain==1.5.2
+langchain-core==1.8.4
+langchain-openai==1.8.5
+langgraph==1.2.24
+langgraph-supervisor==0.0.31
+nbformat==5.11.1
+nest-asyncio==1.6.0
+pydantic==2.14.4
+python-dotenv==1.2.4
+tavily-python==0.8.5
