@@ -12,7 +12,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver
 from openai import DefaultHttpxClient, OpenAI
 
 from agentic.agents.provider import DEFAULT_MODEL, build_openai_reviewer
-from agentic.support_workflow import TicketInput, build_support_graph
+from agentic.workflow import TicketInput, build_support_graph
 from agentic.tools.memory import redact_support_text, separate_memory_path
 from agentic.tools.tickets import TicketAccessError, authorize_demo_ticket
 from agentic.tools.trace import valid_trace_id

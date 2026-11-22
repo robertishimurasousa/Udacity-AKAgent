@@ -44,7 +44,7 @@ Add `--openai` to the command to verify the live provider with two synthetic req
 
 The setup notebooks, local ticket workflow, and tests run without a model API key. For OpenAI review in the project demo, set `OPENAI_API_KEY` in the ignored `.env` file and run [03_agentic_app.py](03_agentic_app.py) with `--openai`. Set `OPENAI_MODEL` to override the default `gpt-4o-mini`. The adapter uses the OpenAI Responses API with a structured verdict and a 20-second client timeout. The reference environment uses Python 3.11, LangGraph 1.2.24, SQLite checkpointer 3.1.3 and OpenAI SDK 3.57.0. [Dependencies](requirements.txt)
 
-The [starter chat notebook](03_agentic_app.ipynb) remains a course reference and uses the sample workflow in `agentic/workflow.py`. For a course-issued Vocareum key, that notebook uses the `OPENAI_BASE_URL` configured by Vocareum. [Vocareum Labs documentation](https://help.vocareum.com/en/articles/9341351-genai-in-vocareum-labs)
+The [starter chat notebook](03_agentic_app.ipynb) remains a course reference and uses the sample workflow in `agentic/starter_workflow.py`. For a course-issued Vocareum key, that notebook uses the `OPENAI_BASE_URL` configured by Vocareum. [Vocareum Labs documentation](https://help.vocareum.com/en/articles/9341351-genai-in-vocareum-labs)
 
 Keep credentials, the virtual environment, and generated databases local. Use the private reporting channel for security reports. [Security policy](SECURITY.md)
 
@@ -78,7 +78,7 @@ The JSONL trace records classifications, routes, candidate article IDs and score
 After database setup, pass a ticket to the project's LangGraph workflow. The initial classifier uses rules for common English CultPass requests.
 
 ```python
-from agentic.support_workflow import build_support_graph
+from agentic.workflow import build_support_graph
 
 graph = build_support_graph("data/core/udahub.db")
 result = graph.invoke({

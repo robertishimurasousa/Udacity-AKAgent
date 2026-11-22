@@ -7,7 +7,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.engine import URL
 from sqlalchemy.orm import Session
 
-from agentic.support_workflow import build_support_graph
+from agentic.workflow import build_support_graph
 from data.models.udahub import Account, Base, Knowledge
 
 
