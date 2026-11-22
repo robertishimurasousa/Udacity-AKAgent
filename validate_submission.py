@@ -18,7 +18,7 @@ SETUP_NOTEBOOKS = ("01_external_db_setup.ipynb", "02_core_db_setup.ipynb")
 REQUIRED_FILES = {
     ".env.example", ".gitignore", "README.md", "LICENSE.md", "SECURITY.md",
     "requirements.txt", "03_agentic_app.py", "03_agentic_app.ipynb", "utils.py", "validate_submission.py",
-    "agentic/support_workflow.py", "agentic/design/README.md", "agentic/design/aceite.md",
+    "agentic/workflow.py", "agentic/starter_workflow.py", "agentic/design/README.md", "agentic/design/aceite.md",
     "data/external/cultpass_articles.jsonl", "tests/test_account_resolution.py",
     "tests/test_handoff_memory.py", "tests/test_knowledge_retrieval.py", "tests/test_support_workflow.py",
     *SETUP_NOTEBOOKS,
@@ -178,7 +178,7 @@ def check_diagram(doc):
 
 def check_architecture(workspace):
     from langgraph.checkpoint.memory import InMemorySaver
-    from agentic.support_workflow import build_support_graph
+    from agentic.workflow import build_support_graph
 
     check_diagram((workspace / "agentic/design/README.md").read_text(encoding="utf-8"))
     graph = build_support_graph(

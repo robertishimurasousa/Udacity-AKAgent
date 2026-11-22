@@ -4,7 +4,7 @@ The UDA-Hub handles CultPass support tickets using articles and authorized accou
 
 ## Architecture choice
 
-The **Supervisor** pattern is implemented as a `StateGraph` in [support_workflow.py](../support_workflow.py). The supervisor applies routing rules to the structured classification, ticket metadata, and retrieved evidence. The agents interpret the message, select evidence, and draft the response or handoff summary. Explicit transitions enforce risk and data access rules.
+The **Supervisor** pattern is implemented as a `StateGraph` in [workflow.py](../workflow.py). The supervisor applies routing rules to the structured classification, ticket metadata, and retrieved evidence. The agents interpret the message, select evidence, and draft the response or handoff summary. Explicit transitions enforce risk and data access rules.
 
 The demo uses the local interface and examples from chat and email, with the same input contract for both channels. The application records the escalation decision for human review. External connectors, financial operations, changes to CultPass records, and MCP are outside the proposed scope.
 

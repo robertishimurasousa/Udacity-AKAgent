@@ -8,6 +8,17 @@ from validate_submission import REQUIRED_FILES, CheckFailure, check_citations, c
 
 
 class SubmissionChecksTests(unittest.TestCase):
+    def test_layout_requires_the_canonical_workflow_module(self):
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            for filename in (REQUIRED_FILES | {"agentic/support_workflow.py"}) - {"agentic/workflow.py"}:
+                target = root / filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.touch()
+            (root / ".env.example").write_text("OPENAI_API_KEY=\n", encoding="utf-8")
+            with self.assertRaisesRegex(CheckFailure, r"agentic/workflow\.py"):
+                check_layout(root)
+
     def test_layout_requires_reviewer_entry_point(self):
         with TemporaryDirectory() as temp:
             root = Path(temp)
