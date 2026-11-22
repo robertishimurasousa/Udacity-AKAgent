@@ -13,3 +13,6 @@ openai>=1.97.0,<4
 pydantic>=2.7,<3
 python-dotenv>=1.1.1
 sqlalchemy>=2.0.41
+pyppeteer
+nest-asyncio
+ipython
